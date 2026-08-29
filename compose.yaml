@@ -1,0 +1,136 @@
+x-sensor: &sensor
+  image: fyke:local
+  build: .
+  restart: unless-stopped
+  read_only: true
+  user: "${FYKE_UID:-1000}:${FYKE_GID:-1000}"
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  pids_limit: 256
+  mem_limit: 384m
+  tmpfs: ["/tmp:size=32m,noexec,nosuid,nodev"]
+  environment:
+    FYKE_CONTAINER: "1"
+    FYKE_DATA_DIR: /var/lib/fyke
+  networks: [sensors, control]
+
+services:
+  init-permissions:
+    image: fyke:local
+    build: .
+    command: [volume-init, /volumes/controller, /volumes/ssh, /volumes/telnet, /volumes/http, /volumes/https]
+    user: "0:0"
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, FOWNER]
+    security_opt: [no-new-privileges:true]
+    network_mode: none
+    environment:
+      FYKE_RUN_UID: "${FYKE_UID:-1000}"
+      FYKE_RUN_GID: "${FYKE_GID:-1000}"
+    volumes:
+      - controller-data:/volumes/controller
+      - ssh-spool:/volumes/ssh
+      - telnet-spool:/volumes/telnet
+      - http-spool:/volumes/http
+      - https-spool:/volumes/https
+
+  controller:
+    image: fyke:local
+    build: .
+    command: [controller, --config, /etc/fyke/config.yaml]
+    restart: unless-stopped
+    read_only: true
+    user: "${FYKE_UID:-1000}:${FYKE_GID:-1000}"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 512
+    mem_limit: 768m
+    environment:
+      FYKE_CONTAINER: "1"
+      FYKE_DATA_DIR: /var/lib/fyke
+      FYKE_CONTROLLER_IDENTITY: /run/secrets/controller.agekey
+      FYKE_CONTROLLER_HTTP: 0.0.0.0:9080
+    volumes:
+      - ${FYKE_ROOT:-.}/config.yaml:/etc/fyke/config.yaml:ro
+      - ${FYKE_ROOT:-.}/personas/default.yaml:/etc/fyke/personas/default.yaml:ro
+      - ${FYKE_ROOT:-.}/pki/ca.crt:/etc/fyke/pki/ca.crt:ro
+      - ${FYKE_ROOT:-.}/pki/controller.crt:/etc/fyke/pki/controller.crt:ro
+      - ${FYKE_ROOT:-.}/pki/controller.key:/etc/fyke/pki/controller.key:ro
+      - ${FYKE_ROOT:-.}/controller.agekey:/run/secrets/controller.agekey:ro
+      - controller-data:/var/lib/fyke
+    tmpfs: ["/tmp:size=64m,noexec,nosuid,nodev"]
+    ports: ["127.0.0.1:9080:9080"]
+    networks: [control, outbound]
+    depends_on:
+      init-permissions: {condition: service_completed_successfully}
+
+  sensor-ssh:
+    <<: *sensor
+    command: [sensor, --config, /etc/fyke/config.yaml, --id, ssh]
+    ports: ["${FYKE_SSH_PORT:-22}:2222"]
+    volumes:
+      - ${FYKE_ROOT:-.}/config.yaml:/etc/fyke/config.yaml:ro
+      - ${FYKE_ROOT:-.}/personas/default.yaml:/etc/fyke/personas/default.yaml:ro
+      - ${FYKE_ROOT:-.}/pki/ca.crt:/etc/fyke/pki/ca.crt:ro
+      - ${FYKE_ROOT:-.}/pki/sensor-ssh.crt:/etc/fyke/pki/sensor-ssh.crt:ro
+      - ${FYKE_ROOT:-.}/pki/sensor-ssh.key:/etc/fyke/pki/sensor-ssh.key:ro
+      - ${FYKE_ROOT:-.}/pki/ssh_host_ed25519_key:/etc/fyke/pki/ssh_host_ed25519_key:ro
+      - ssh-spool:/var/lib/fyke
+    depends_on:
+      controller: {condition: service_started}
+      init-permissions: {condition: service_completed_successfully}
+  sensor-telnet:
+    <<: *sensor
+    command: [sensor, --config, /etc/fyke/config.yaml, --id, telnet]
+    ports: ["${FYKE_TELNET_PORT:-23}:2323"]
+    volumes:
+      - ${FYKE_ROOT:-.}/config.yaml:/etc/fyke/config.yaml:ro
+      - ${FYKE_ROOT:-.}/personas/default.yaml:/etc/fyke/personas/default.yaml:ro
+      - ${FYKE_ROOT:-.}/pki/ca.crt:/etc/fyke/pki/ca.crt:ro
+      - ${FYKE_ROOT:-.}/pki/sensor-telnet.crt:/etc/fyke/pki/sensor-telnet.crt:ro
+      - ${FYKE_ROOT:-.}/pki/sensor-telnet.key:/etc/fyke/pki/sensor-telnet.key:ro
+      - telnet-spool:/var/lib/fyke
+    depends_on:
+      controller: {condition: service_started}
+      init-permissions: {condition: service_completed_successfully}
+  sensor-http:
+    <<: *sensor
+    command: [sensor, --config, /etc/fyke/config.yaml, --id, http]
+    ports: ["${FYKE_HTTP_PORT:-80}:8080"]
+    volumes:
+      - ${FYKE_ROOT:-.}/config.yaml:/etc/fyke/config.yaml:ro
+      - ${FYKE_ROOT:-.}/personas/default.yaml:/etc/fyke/personas/default.yaml:ro
+      - ${FYKE_ROOT:-.}/pki/ca.crt:/etc/fyke/pki/ca.crt:ro
+      - ${FYKE_ROOT:-.}/pki/sensor-http.crt:/etc/fyke/pki/sensor-http.crt:ro
+      - ${FYKE_ROOT:-.}/pki/sensor-http.key:/etc/fyke/pki/sensor-http.key:ro
+      - http-spool:/var/lib/fyke
+    depends_on:
+      controller: {condition: service_started}
+      init-permissions: {condition: service_completed_successfully}
+  sensor-https:
+    <<: *sensor
+    command: [sensor, --config, /etc/fyke/config.yaml, --id, https]
+    ports: ["${FYKE_HTTPS_PORT:-443}:8443"]
+    volumes:
+      - ${FYKE_ROOT:-.}/config.yaml:/etc/fyke/config.yaml:ro
+      - ${FYKE_ROOT:-.}/personas/default.yaml:/etc/fyke/personas/default.yaml:ro
+      - ${FYKE_ROOT:-.}/pki/ca.crt:/etc/fyke/pki/ca.crt:ro
+      - ${FYKE_ROOT:-.}/pki/sensor-https.crt:/etc/fyke/pki/sensor-https.crt:ro
+      - ${FYKE_ROOT:-.}/pki/sensor-https.key:/etc/fyke/pki/sensor-https.key:ro
+      - https-spool:/var/lib/fyke
+    depends_on:
+      controller: {condition: service_started}
+      init-permissions: {condition: service_completed_successfully}
+
+networks:
+  sensors:
+    driver: bridge
+    driver_opts: {com.docker.network.bridge.name: fyke-sensors}
+  control:
+    internal: true
+    driver: bridge
+    driver_opts: {com.docker.network.bridge.name: fyke-control}
+  outbound:
+    driver: bridge
+volumes: {controller-data: {}, ssh-spool: {}, telnet-spool: {}, http-spool: {}, https-spool: {}}

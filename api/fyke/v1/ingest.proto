@@ -1,0 +1,12 @@
+syntax = "proto3";
+package fyke.v1;
+option go_package = "github.com/ksahoo/fyke/internal/transport";
+
+message Envelope {
+  uint32 version = 1;
+  string sensor_id = 2;
+  string message_id = 3;
+  bytes payload = 4;
+}
+message Ack { string message_id = 1; bool accepted = 2; string error = 3; }
+service Ingest { rpc Stream(stream Envelope) returns (stream Ack); }
