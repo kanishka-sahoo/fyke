@@ -4,6 +4,7 @@ ui:
 	cd frontend && npm ci && npm run build
 
 test:
+	./scripts/go-live.test.sh
 	go test ./...
 
 ui-test:

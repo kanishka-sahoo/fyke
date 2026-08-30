@@ -206,12 +206,6 @@ setup_banner() {
 open_setup_url() {
   local url="$1"
   say "Open this address in a browser: $url"
-  { if command -v wslview >/dev/null 2>&1; then wslview "$url"
-    elif command -v explorer.exe >/dev/null 2>&1; then explorer.exe "$url"
-    elif command -v xdg-open >/dev/null 2>&1; then xdg-open "$url"
-    elif command -v open >/dev/null 2>&1; then open "$url"
-    else return 1; fi
-  } >/dev/null 2>&1 || warn "This script cannot open the browser. Open the address manually."
 }
 
 save_setting() {
@@ -299,6 +293,10 @@ restore_ssh_dropin() {
   reload_ssh_listener
 }
 
+if [[ "${FYKE_GO_LIVE_FUNCTIONS_ONLY:-0}" == 1 ]]; then
+  return 0 2>/dev/null || exit 0
+fi
+
 setup_banner
 
 stage "Check this server"
@@ -373,7 +371,6 @@ say "A grant is a Tailscale access rule."
 say "The new grant lets the selected user or group use real SSH and the dashboard."
 warn "An old rule can still give access to other users. Check all rules for this VPS."
 open_setup_url "https://login.tailscale.com/admin/acls"
-step "Open the Tailscale Access controls page."
 step "Add this grant to the current policy. Keep all unrelated rules."
 printf '\n    {\n      "src": ["%s"],\n      "dst": ["%s"],\n      "ip": ["tcp:%s", "tcp:443"]\n    }\n\n' \
   "$TAILSCALE_ADMIN_PRINCIPAL" "$TAILSCALE_IP" "$ADMIN_TAILNET_PORT"
