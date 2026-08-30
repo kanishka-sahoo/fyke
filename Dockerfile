@@ -1,7 +1,7 @@
 FROM node:24-bookworm-slim AS ui
 WORKDIR /src/frontend
 COPY frontend/package.json frontend/package-lock.json* ./
-RUN npm install
+RUN npm ci
 COPY frontend ./
 COPY internal/web /src/internal/web
 RUN npm run build

@@ -22,7 +22,7 @@ func ServeMetrics(ctx context.Context, address string, st *store.Store) error {
 	})
 	mux.HandleFunc("GET /livez", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
-		if e := st.IntegrityCheck(r.Context()); e != nil {
+		if e := st.Ping(r.Context()); e != nil {
 			http.Error(w, "not ready", 503)
 			return
 		}

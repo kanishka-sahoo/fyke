@@ -17,6 +17,7 @@ type Envelope struct {
 	SensorId  string `protobuf:"bytes,2,opt,name=sensor_id,json=sensorId,proto3" json:"sensor_id,omitempty"`
 	MessageId string `protobuf:"bytes,3,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
 	Payload   []byte `protobuf:"bytes,4,opt,name=payload,proto3" json:"payload,omitempty"`
+	Heartbeat bool   `protobuf:"varint,5,opt,name=heartbeat,proto3" json:"heartbeat,omitempty"`
 }
 
 func (x *Envelope) Reset()         { *x = Envelope{} }

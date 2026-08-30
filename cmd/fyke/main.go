@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -61,6 +62,8 @@ func run(args []string) error {
 		return restoreCmd(args[1:])
 	case "export":
 		return exportCmd(args[1:])
+	case "healthcheck":
+		return healthcheckCmd()
 	case "volume-init":
 		return ops.InitVolumes(args[1:])
 	default:
@@ -111,8 +114,15 @@ func controllerCmd(args []string) error {
 	ctx, cancel := signalContext()
 	defer cancel()
 	broker := controller.NewBroker()
-	api := controller.NewAPI(st, broker, c)
-	alerts := controller.NewAlertEngine(ctx, st, broker, c.Alerts)
+	alertConfig := c.Alerts
+	if _, e = st.GetSetting(ctx, "alerts", &alertConfig); e != nil {
+		return fmt.Errorf("load alert preferences: %w", e)
+	}
+	if e = alertConfig.Validate(); e != nil {
+		return fmt.Errorf("stored alert preferences: %w", e)
+	}
+	alerts := controller.NewAlertEngine(ctx, st, broker, alertConfig)
+	api := controller.NewAPI(st, broker, alerts, c)
 	publish := func(event model.Event) { broker.Publish(event); alerts.Process(event) }
 	errs := make(chan error, 3)
 	go func() {
@@ -193,24 +203,34 @@ func doctorCmd(args []string) error {
 	if e != nil {
 		return e
 	}
-	if _, e = persona.Load(c.PersonaFile); e != nil {
-		return fmt.Errorf("persona: %w", e)
+	if e = ops.Doctor(c); e != nil {
+		return e
 	}
-	if _, e = os.Stat(c.Controller.Identity); e != nil {
-		return fmt.Errorf("controller identity: %w", e)
-	}
-	fmt.Println("ok: configuration and persona are valid")
+	fmt.Println("ok: configuration, persona, encryption identity, mTLS identities, and SSH host identity are valid")
 	fmt.Println("warning: verify Tailscale Serve or alternate-port administration before publishing ports 22/23/80/443")
 	fmt.Println("warning: containment requires `fyke firewall apply`; Compose isolation is not a host firewall")
-	if os.Getenv("FYKE_PCAP") != "" {
-		fmt.Println("warning: PCAP profile weakens isolation by granting NET_RAW")
+	return nil
+}
+
+func healthcheckCmd() error {
+	client := &http.Client{Timeout: 3 * time.Second}
+	response, e := client.Get("http://127.0.0.1:9090/readyz")
+	if e != nil {
+		return e
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return fmt.Errorf("readiness endpoint returned %s", response.Status)
 	}
 	return nil
 }
 func firewallCmd(args []string) error {
-	if len(args) == 0 || args[0] != "apply" {
+	if len(args) > 0 && args[0] == "print" {
 		fmt.Print(ops.FirewallRules())
-		return fmt.Errorf("firewall changes are explicit: run `fyke firewall apply --config config.yaml`")
+		return nil
+	}
+	if len(args) == 0 || args[0] != "apply" {
+		return fmt.Errorf("usage: fyke firewall <print|apply>; changes are explicit")
 	}
 	c, e := load(args[1:], "firewall apply")
 	if e != nil {

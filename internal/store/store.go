@@ -22,6 +22,7 @@ import (
 type Store struct {
 	db          *sql.DB
 	sealer      *cryptokit.Sealer
+	dataDir     string
 	artifactDir string
 	writeMu     sync.Mutex
 }
@@ -47,22 +48,24 @@ type Overview struct {
 	Protocols    map[string]int64 `json:"protocols"`
 }
 type SensorHealth struct {
-	ID           string    `json:"id"`
-	LastSeen     time.Time `json:"last_seen"`
-	Status       string    `json:"status"`
-	LastSequence uint64    `json:"last_sequence"`
+	ID             string    `json:"id"`
+	LastSeen       time.Time `json:"last_seen"`
+	Status         string    `json:"status"`
+	LastSequence   uint64    `json:"last_sequence"`
+	RecordedStatus string    `json:"-"`
 }
 
 func Open(dataDir string, sealer *cryptokit.Sealer) (*Store, error) {
 	if err := os.MkdirAll(filepath.Join(dataDir, "artifacts"), 0700); err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite", filepath.Join(dataDir, "fyke.db")+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=synchronous(FULL)")
+	dbPath := filepath.Join(dataDir, "fyke.db")
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=synchronous(FULL)")
 	if err != nil {
 		return nil, err
 	}
 	db.SetMaxOpenConns(8)
-	s := &Store{db: db, sealer: sealer, artifactDir: filepath.Join(dataDir, "artifacts")}
+	s := &Store{db: db, sealer: sealer, dataDir: dataDir, artifactDir: filepath.Join(dataDir, "artifacts")}
 	if err = s.migrate(context.Background()); err != nil {
 		db.Close()
 		return nil, err
@@ -110,13 +113,24 @@ func (s *Store) Insert(ctx context.Context, e model.Event) error {
 		return err
 	}
 	defer tx.Rollback()
+	var createdEvidence []string
+	committed := false
+	defer func() {
+		if !committed {
+			for _, path := range createdEvidence {
+				_ = os.Remove(path)
+			}
+		}
+	}()
 	res, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO events VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, e.ID, e.Timestamp.Format(time.RFC3339Nano), e.Schema, e.SensorID, e.SessionID, e.Sequence, e.Source.IP, e.Source.Port, e.Destination.IP, e.Destination.Port, e.Protocol, e.Type, e.Outcome, e.Persona, string(a), string(p))
 	if err != nil {
 		return err
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		return tx.Commit()
+		err = tx.Commit()
+		committed = err == nil
+		return err
 	}
 	search := plainSearch(e.Attributes) + " " + plainSearch(e.ProtocolData)
 	if _, err = tx.ExecContext(ctx, `INSERT INTO event_search(id,source_ip,protocol,event_type,outcome,content) VALUES(?,?,?,?,?,?)`, e.ID, e.Source.IP, e.Protocol, e.Type, e.Outcome, search); err != nil {
@@ -138,12 +152,12 @@ func (s *Store) Insert(ctx context.Context, e model.Event) error {
 		if er = os.WriteFile(full, sealed, 0600); er != nil {
 			return er
 		}
+		createdEvidence = append(createdEvidence, full)
 		name := ""
 		if ev.Filename != "" {
 			name = filepath.Base(strings.ReplaceAll(ev.Filename, "\\", "/"))
 		}
 		if _, er = tx.ExecContext(ctx, `INSERT INTO evidence VALUES(?,?,?,?,?,?,?,?,?)`, id, e.ID, ev.Kind, ev.ContentType, name, hash, len(ev.Data), rel, e.Timestamp.UTC().Format(time.RFC3339Nano)); er != nil {
-			os.Remove(full)
 			return er
 		}
 	}
@@ -151,7 +165,11 @@ func (s *Store) Insert(ctx context.Context, e model.Event) error {
 	if err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	committed = true
+	return nil
 }
 func plainSearch(v map[string]any) string {
 	var b strings.Builder
@@ -285,24 +303,49 @@ func (s *Store) Overview(ctx context.Context) (Overview, error) {
 		o.Protocols[k] = n
 	}
 	rows.Close()
-	rows, e = s.db.QueryContext(ctx, `SELECT id,last_seen,status,last_sequence FROM sensors ORDER BY id`)
+	o.Sensors, e = s.SensorHealth(ctx, time.Now(), 2*time.Minute)
+	return o, e
+}
+
+func (s *Store) SensorHealth(ctx context.Context, now time.Time, unhealthyAfter time.Duration) ([]SensorHealth, error) {
+	rows, e := s.db.QueryContext(ctx, `SELECT id,last_seen,status,last_sequence FROM sensors WHERE id <> 'controller' ORDER BY id`)
 	if e != nil {
-		return o, e
+		return nil, e
 	}
 	defer rows.Close()
+	var out []SensorHealth
 	for rows.Next() {
 		var h SensorHealth
 		var t string
-		if e = rows.Scan(&h.ID, &t, &h.Status, &h.LastSequence); e != nil {
-			return o, e
+		if e = rows.Scan(&h.ID, &t, &h.RecordedStatus, &h.LastSequence); e != nil {
+			return nil, e
 		}
+		h.Status = h.RecordedStatus
 		h.LastSeen, _ = time.Parse(time.RFC3339Nano, t)
-		if time.Since(h.LastSeen) > 2*time.Minute {
+		if now.Sub(h.LastSeen) > unhealthyAfter {
 			h.Status = "unhealthy"
 		}
-		o.Sensors = append(o.Sensors, h)
+		out = append(out, h)
 	}
-	return o, rows.Err()
+	return out, rows.Err()
+}
+func (s *Store) SetSensorStatus(ctx context.Context, id, status string) error {
+	if status != "healthy" && status != "unhealthy" {
+		return fmt.Errorf("invalid sensor status %q", status)
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	_, e := s.db.ExecContext(ctx, `UPDATE sensors SET status=? WHERE id=?`, status, id)
+	return e
+}
+func (s *Store) TouchSensor(ctx context.Context, id string, now time.Time) error {
+	if id == "" || id == "controller" {
+		return fmt.Errorf("invalid sensor id %q", id)
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	_, e := s.db.ExecContext(ctx, `INSERT INTO sensors(id,last_seen,last_session,last_sequence,status) VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET last_seen=excluded.last_seen,status='healthy'`, id, now.UTC().Format(time.RFC3339Nano), "", 0, "healthy")
+	return e
 }
 func (s *Store) Audit(ctx context.Context, action, remote string, details any) error {
 	s.writeMu.Lock()
@@ -321,6 +364,19 @@ func (s *Store) SetSetting(ctx context.Context, key string, value any) error {
 	_, e = s.db.ExecContext(ctx, `INSERT INTO settings(key,value_json,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at`, key, string(b), time.Now().UTC().Format(time.RFC3339Nano))
 	return e
 }
+func (s *Store) GetSetting(ctx context.Context, key string, value any) (bool, error) {
+	var b string
+	if e := s.db.QueryRowContext(ctx, `SELECT value_json FROM settings WHERE key=?`, key).Scan(&b); e != nil {
+		if errors.Is(e, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, e
+	}
+	if e := json.Unmarshal([]byte(b), value); e != nil {
+		return false, fmt.Errorf("decode setting %q: %w", key, e)
+	}
+	return true, nil
+}
 func (s *Store) IntegrityCheck(ctx context.Context) error {
 	var v string
 	if e := s.db.QueryRowContext(ctx, `PRAGMA integrity_check`).Scan(&v); e != nil {
@@ -331,4 +387,5 @@ func (s *Store) IntegrityCheck(ctx context.Context) error {
 	}
 	return nil
 }
-func (s *Store) DB() *sql.DB { return s.db }
+func (s *Store) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }
+func (s *Store) DB() *sql.DB                    { return s.db }

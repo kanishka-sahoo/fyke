@@ -7,6 +7,7 @@ message Envelope {
   string sensor_id = 2;
   string message_id = 3;
   bytes payload = 4;
+  bool heartbeat = 5;
 }
 message Ack { string message_id = 1; bool accepted = 2; string error = 3; }
 service Ingest { rpc Stream(stream Envelope) returns (stream Ack); }

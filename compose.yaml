@@ -62,6 +62,12 @@ services:
     tmpfs: ["/tmp:size=64m,noexec,nosuid,nodev"]
     ports: ["127.0.0.1:9080:9080"]
     networks: [control, outbound]
+    healthcheck:
+      test: [CMD, /usr/local/bin/fyke, healthcheck]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
     depends_on:
       init-permissions: {condition: service_completed_successfully}
 
@@ -78,7 +84,7 @@ services:
       - ${FYKE_ROOT:-.}/pki/ssh_host_ed25519_key:/etc/fyke/pki/ssh_host_ed25519_key:ro
       - ssh-spool:/var/lib/fyke
     depends_on:
-      controller: {condition: service_started}
+      controller: {condition: service_healthy}
       init-permissions: {condition: service_completed_successfully}
   sensor-telnet:
     <<: *sensor
@@ -92,7 +98,7 @@ services:
       - ${FYKE_ROOT:-.}/pki/sensor-telnet.key:/etc/fyke/pki/sensor-telnet.key:ro
       - telnet-spool:/var/lib/fyke
     depends_on:
-      controller: {condition: service_started}
+      controller: {condition: service_healthy}
       init-permissions: {condition: service_completed_successfully}
   sensor-http:
     <<: *sensor
@@ -106,7 +112,7 @@ services:
       - ${FYKE_ROOT:-.}/pki/sensor-http.key:/etc/fyke/pki/sensor-http.key:ro
       - http-spool:/var/lib/fyke
     depends_on:
-      controller: {condition: service_started}
+      controller: {condition: service_healthy}
       init-permissions: {condition: service_completed_successfully}
   sensor-https:
     <<: *sensor
@@ -120,7 +126,7 @@ services:
       - ${FYKE_ROOT:-.}/pki/sensor-https.key:/etc/fyke/pki/sensor-https.key:ro
       - https-spool:/var/lib/fyke
     depends_on:
-      controller: {condition: service_started}
+      controller: {condition: service_healthy}
       init-permissions: {condition: service_completed_successfully}
 
 networks:

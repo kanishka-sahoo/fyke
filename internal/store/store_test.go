@@ -52,6 +52,94 @@ func TestInsertDeduplicatesAndSealsEvidence(t *testing.T) {
 		t.Fatalf("list=%d err=%v", len(listed), e)
 	}
 }
+
+func TestSettingsRoundTrip(t *testing.T) {
+	root := t.TempDir()
+	id := filepath.Join(root, "identity")
+	cryptokit.GenerateIdentity(id)
+	seal, _ := cryptokit.Load(id)
+	st, e := Open(filepath.Join(root, "data"), seal)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer st.Close()
+	want := map[string]any{"enabled": true, "threshold": float64(12)}
+	if e = st.SetSetting(context.Background(), "test", want); e != nil {
+		t.Fatal(e)
+	}
+	var got map[string]any
+	found, e := st.GetSetting(context.Background(), "test", &got)
+	if e != nil || !found || got["enabled"] != true || got["threshold"] != float64(12) {
+		t.Fatalf("GetSetting() = %#v, %t, %v", got, found, e)
+	}
+}
+
+func TestTouchSensorRefreshesHealthWithoutCreatingEvent(t *testing.T) {
+	root := t.TempDir()
+	id := filepath.Join(root, "identity")
+	cryptokit.GenerateIdentity(id)
+	seal, _ := cryptokit.Load(id)
+	st, e := Open(filepath.Join(root, "data"), seal)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer st.Close()
+	now := time.Now().UTC()
+	if e = st.TouchSensor(context.Background(), "ssh", now); e != nil {
+		t.Fatal(e)
+	}
+	health, e := st.SensorHealth(context.Background(), now.Add(time.Minute), 2*time.Minute)
+	if e != nil || len(health) != 1 || health[0].Status != "healthy" {
+		t.Fatalf("health = %#v, %v", health, e)
+	}
+	var events int
+	if e = st.DB().QueryRow(`SELECT count(*) FROM events`).Scan(&events); e != nil || events != 0 {
+		t.Fatalf("heartbeat created %d events: %v", events, e)
+	}
+}
+
+func TestRetentionCapIncludesDatabaseAndEvictsEvidenceFirst(t *testing.T) {
+	root := t.TempDir()
+	id := filepath.Join(root, "identity")
+	cryptokit.GenerateIdentity(id)
+	seal, _ := cryptokit.Load(id)
+	st, e := Open(filepath.Join(root, "data"), seal)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	for i := 1; i <= 300; i++ {
+		event := model.Event{SensorID: "ssh", SessionID: "cap", Sequence: uint64(i), Protocol: "ssh", Type: "command", Attributes: map[string]any{"payload": string(bytes.Repeat([]byte{'x'}, 8192))}}
+		if i == 1 {
+			event.Evidence = []model.Evidence{{Kind: "transcript", Data: bytes.Repeat([]byte{'s'}, 256<<10)}}
+		}
+		if e = st.Insert(ctx, event); e != nil {
+			t.Fatal(e)
+		}
+	}
+	if e = st.checkpoint(ctx); e != nil {
+		t.Fatal(e)
+	}
+	before, e := st.diskUsage()
+	if e != nil || before <= 1<<20 {
+		t.Fatalf("test fixture uses %d bytes: %v", before, e)
+	}
+	result, e := st.Prune(ctx, RetentionPolicy{MetadataDays: 365, TranscriptDays: 365, PCAPDays: 365, PayloadDays: 365, TotalBytes: 1 << 20})
+	if e != nil {
+		t.Fatal(e)
+	}
+	after, e := st.diskUsage()
+	if e != nil {
+		t.Fatal(e)
+	}
+	if after > 1<<20 {
+		t.Fatalf("disk usage after prune = %d, want <= %d", after, 1<<20)
+	}
+	if result.EvidenceDeleted != 1 || result.EventsDeleted == 0 {
+		t.Fatalf("unexpected retention result: %#v", result)
+	}
+}
 func TestRetentionDeletesOldTranscriptBeforeMetadata(t *testing.T) {
 	root := t.TempDir()
 	id := filepath.Join(root, "identity")

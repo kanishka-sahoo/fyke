@@ -21,14 +21,15 @@ import (
 )
 
 type API struct {
-	store   *store.Store
-	broker  *Broker
-	cfg     config.Config
-	started time.Time
+	store       *store.Store
+	broker      *Broker
+	alertEngine *AlertEngine
+	cfg         config.Config
+	started     time.Time
 }
 
-func NewAPI(st *store.Store, b *Broker, c config.Config) *API {
-	return &API{store: st, broker: b, cfg: c, started: time.Now()}
+func NewAPI(st *store.Store, b *Broker, alerts *AlertEngine, c config.Config) *API {
+	return &API{store: st, broker: b, alertEngine: alerts, cfg: c, started: time.Now()}
 }
 func (a *API) Handler(ui http.Handler) http.Handler {
 	mux := http.NewServeMux()
@@ -327,16 +328,29 @@ func (a *API) runRetention(w http.ResponseWriter, r *http.Request) {
 }
 func (a *API) alertPreferences(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
-		respond(w, a.cfg.Alerts, nil)
+		respond(w, a.alertEngine.Config(), nil)
 		return
 	}
 	var v config.Alerts
-	if e := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&v); e != nil {
+	decoder := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
+	decoder.DisallowUnknownFields()
+	if e := decoder.Decode(&v); e != nil {
 		problem(w, 400, "invalid JSON")
 		return
 	}
+	if e := decoder.Decode(&struct{}{}); e != io.EOF {
+		problem(w, 400, "request body must contain one JSON object")
+		return
+	}
+	if e := v.Validate(); e != nil {
+		problem(w, 400, e.Error())
+		return
+	}
 	e := a.store.SetSetting(r.Context(), "alerts", v)
-	a.store.Audit(r.Context(), "alerts.preferences.update", r.RemoteAddr, v)
+	if e == nil {
+		a.alertEngine.UpdateConfig(v)
+		a.store.Audit(r.Context(), "alerts.preferences.update", r.RemoteAddr, v)
+	}
 	respond(w, v, e)
 }
 func respond(w http.ResponseWriter, v any, e error) {

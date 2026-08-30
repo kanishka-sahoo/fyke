@@ -81,10 +81,13 @@ func (c *Client) runOnce(ctx context.Context) error {
 			return e
 		}
 		if len(records) == 0 {
+			if e = c.heartbeat(stream); e != nil {
+				return e
+			}
 			select {
 			case <-c.spool.Wake():
 				continue
-			case <-time.After(10 * time.Second):
+			case <-time.After(30 * time.Second):
 				continue
 			case <-ctx.Done():
 				return ctx.Err()
@@ -109,4 +112,22 @@ func (c *Client) runOnce(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+func (c *Client) heartbeat(stream Ingest_StreamClient) error {
+	id := model.NewUUIDv7(time.Now())
+	if e := stream.Send(&Envelope{Version: Version, SensorId: c.sensorID, MessageId: id, Heartbeat: true}); e != nil {
+		return e
+	}
+	ack, e := stream.Recv()
+	if e != nil {
+		return e
+	}
+	if ack.MessageId != id {
+		return fmt.Errorf("heartbeat ack mismatch")
+	}
+	if !ack.Accepted {
+		return fmt.Errorf("controller rejected heartbeat: %s", ack.Error)
+	}
+	return nil
 }

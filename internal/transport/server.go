@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/ksahoo/fyke/internal/model"
 	"github.com/ksahoo/fyke/internal/store"
@@ -32,6 +33,9 @@ func (s *Server) Stream(stream Ingest_StreamServer) error {
 	if e != nil {
 		return e
 	}
+	if e = s.store.TouchSensor(stream.Context(), sensorID, time.Now()); e != nil {
+		return e
+	}
 	for {
 		env, e := stream.Recv()
 		if e == io.EOF {
@@ -45,6 +49,14 @@ func (s *Server) Stream(stream Ingest_StreamServer) error {
 			ack.Error = "unsupported transport version"
 		} else if env.SensorId != sensorID {
 			ack.Error = "certificate SAN does not match envelope sensor"
+		} else if env.Heartbeat {
+			if len(env.Payload) != 0 {
+				ack.Error = "heartbeat must not contain an event payload"
+			} else if e = s.store.TouchSensor(stream.Context(), sensorID, time.Now()); e != nil {
+				ack.Error = e.Error()
+			} else {
+				ack.Accepted = true
+			}
 		} else {
 			var event model.Event
 			if e = json.Unmarshal(env.Payload, &event); e != nil {

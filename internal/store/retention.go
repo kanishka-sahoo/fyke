@@ -2,8 +2,10 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -43,7 +45,15 @@ func (s *Store) Prune(ctx context.Context, p RetentionPolicy) (RetentionResult, 
 				rows.Close()
 				return out, e
 			}
-			if e = os.Remove(filepath.Join(s.artifactDir, rel)); e != nil && !os.IsNotExist(e) {
+			full := filepath.Join(s.artifactDir, rel)
+			diskBytes := n
+			if info, statErr := os.Stat(full); statErr == nil {
+				diskBytes = info.Size()
+			} else if !os.IsNotExist(statErr) {
+				rows.Close()
+				return out, statErr
+			}
+			if e = os.Remove(full); e != nil && !os.IsNotExist(e) {
 				rows.Close()
 				return out, e
 			}
@@ -52,7 +62,7 @@ func (s *Store) Prune(ctx context.Context, p RetentionPolicy) (RetentionResult, 
 				return out, e
 			}
 			out.EvidenceDeleted++
-			out.BytesDeleted += n
+			out.BytesDeleted += diskBytes
 		}
 		rows.Close()
 	}
@@ -74,39 +84,164 @@ func (s *Store) enforceCap(ctx context.Context, cap int64, out *RetentionResult)
 	if cap <= 0 {
 		return nil
 	}
-	var used int64
-	filepath.Walk(s.artifactDir, func(_ string, i os.FileInfo, e error) error {
-		if e == nil && !i.IsDir() {
-			used += i.Size()
-		}
-		return nil
-	})
-	if used <= cap {
-		return nil
-	}
-	rows, e := s.db.QueryContext(ctx, `SELECT id,path,size FROM evidence ORDER BY CASE kind WHEN 'pcap' THEN 0 WHEN 'artifact.upload' THEN 1 WHEN 'transcript' THEN 2 ELSE 3 END,created_at`)
+	used, e := s.diskUsage()
 	if e != nil {
 		return e
 	}
-	defer rows.Close()
-	for rows.Next() {
-		if used <= cap {
-			break
-		}
-		var id, rel string
-		var n int64
-		if e = rows.Scan(&id, &rel, &n); e != nil {
-			return e
-		}
-		if e = os.Remove(filepath.Join(s.artifactDir, rel)); e != nil && !os.IsNotExist(e) {
-			return e
-		}
-		if _, e = s.db.ExecContext(ctx, `DELETE FROM evidence WHERE id=?`, id); e != nil {
-			return e
-		}
-		used -= n
-		out.EvidenceDeleted++
-		out.BytesDeleted += n
+	if used <= cap {
+		return nil
 	}
-	return rows.Err()
+	type evidenceFile struct{ id, rel string }
+	rows, e := s.db.QueryContext(ctx, `SELECT id,path FROM evidence ORDER BY CASE kind WHEN 'pcap' THEN 0 WHEN 'artifact.upload' THEN 1 WHEN 'http.body' THEN 2 WHEN 'transcript' THEN 3 ELSE 4 END,created_at`)
+	if e != nil {
+		return e
+	}
+	var evidence []evidenceFile
+	for rows.Next() {
+		var item evidenceFile
+		if e = rows.Scan(&item.id, &item.rel); e != nil {
+			rows.Close()
+			return e
+		}
+		evidence = append(evidence, item)
+	}
+	if e = rows.Close(); e != nil {
+		return e
+	}
+	if e = rows.Err(); e != nil {
+		return e
+	}
+	for next := 0; next < len(evidence) && used > cap; {
+		for next < len(evidence) && used > cap {
+			item := evidence[next]
+			next++
+			full := filepath.Join(s.artifactDir, item.rel)
+			var diskBytes int64
+			if info, statErr := os.Stat(full); statErr == nil {
+				diskBytes = info.Size()
+			} else if !os.IsNotExist(statErr) {
+				return statErr
+			}
+			if e = os.Remove(full); e != nil && !os.IsNotExist(e) {
+				return e
+			}
+			if _, e = s.db.ExecContext(ctx, `DELETE FROM evidence WHERE id=?`, item.id); e != nil {
+				return e
+			}
+			used -= diskBytes
+			out.EvidenceDeleted++
+			out.BytesDeleted += diskBytes
+		}
+		if e = s.checkpoint(ctx); e != nil {
+			return e
+		}
+		used, e = s.diskUsage()
+		if e != nil {
+			return e
+		}
+	}
+	if e != nil || used <= cap {
+		return e
+	}
+	if out.EvidenceDeleted > 0 {
+		if e = s.compact(ctx); e != nil {
+			return e
+		}
+		used, e = s.diskUsage()
+		if e != nil || used <= cap {
+			return e
+		}
+	}
+
+	// Evidence is always exhausted before metadata. Delete old events in
+	// bounded batches and compact SQLite so the on-disk cap is real rather than
+	// merely a count of logical row sizes.
+	for used > cap {
+		ids, listErr := s.oldestEventIDs(ctx, 500)
+		if listErr != nil {
+			return listErr
+		}
+		if len(ids) == 0 {
+			return fmt.Errorf("retention cap %d bytes is smaller than Fyke's non-event database state (%d bytes used)", cap, used)
+		}
+		tx, beginErr := s.db.BeginTx(ctx, nil)
+		if beginErr != nil {
+			return beginErr
+		}
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+		args := make([]any, len(ids))
+		for i := range ids {
+			args[i] = ids[i]
+		}
+		if _, e = tx.ExecContext(ctx, `DELETE FROM event_search WHERE id IN (`+placeholders+`)`, args...); e == nil {
+			var result interface{ RowsAffected() (int64, error) }
+			result, e = tx.ExecContext(ctx, `DELETE FROM events WHERE id IN (`+placeholders+`)`, args...)
+			if e == nil {
+				var deleted int64
+				deleted, e = result.RowsAffected()
+				out.EventsDeleted += deleted
+			}
+		}
+		if e != nil {
+			tx.Rollback()
+			return e
+		}
+		if e = tx.Commit(); e != nil {
+			return e
+		}
+		if e = s.compact(ctx); e != nil {
+			return e
+		}
+		used, e = s.diskUsage()
+		if e != nil {
+			return e
+		}
+	}
+	return nil
+}
+
+func (s *Store) oldestEventIDs(ctx context.Context, limit int) ([]string, error) {
+	rows, e := s.db.QueryContext(ctx, `SELECT id FROM events ORDER BY timestamp,id LIMIT ?`, limit)
+	if e != nil {
+		return nil, e
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if e = rows.Scan(&id); e != nil {
+			return nil, e
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+func (s *Store) checkpoint(ctx context.Context) error {
+	_, e := s.db.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`)
+	return e
+}
+
+func (s *Store) compact(ctx context.Context) error {
+	if e := s.checkpoint(ctx); e != nil {
+		return e
+	}
+	if _, e := s.db.ExecContext(ctx, `VACUUM`); e != nil {
+		return e
+	}
+	return s.checkpoint(ctx)
+}
+
+func (s *Store) diskUsage() (int64, error) {
+	var used int64
+	e := filepath.Walk(s.dataDir, func(_ string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !info.IsDir() {
+			used += info.Size()
+		}
+		return nil
+	})
+	return used, e
 }

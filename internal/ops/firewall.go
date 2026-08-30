@@ -23,6 +23,8 @@ func FirewallApply(dataDir string) error {
 	if e := os.WriteFile(file, []byte(nftRules), 0600); e != nil {
 		return e
 	}
+	// Replacing Fyke's own table makes repeated explicit applications safe.
+	_ = exec.Command("nft", "delete", "table", "inet", "fyke").Run()
 	cmd := exec.Command("nft", "-f", file)
 	out, e := cmd.CombinedOutput()
 	if e != nil {

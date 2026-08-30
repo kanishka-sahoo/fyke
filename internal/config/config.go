@@ -2,9 +2,12 @@ package config
 
 import (
 	"fmt"
+	"io"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -50,19 +53,19 @@ type Limits struct {
 	SpoolBytes        int64         `yaml:"spool_bytes"`
 }
 type Retention struct {
-	MetadataDays   int   `yaml:"metadata_days"`
-	TranscriptDays int   `yaml:"transcript_days"`
-	PCAPDays       int   `yaml:"pcap_days"`
-	PayloadDays    int   `yaml:"payload_days"`
-	TotalBytes     int64 `yaml:"total_bytes"`
+	MetadataDays   int   `yaml:"metadata_days" json:"metadata_days"`
+	TranscriptDays int   `yaml:"transcript_days" json:"transcript_days"`
+	PCAPDays       int   `yaml:"pcap_days" json:"pcap_days"`
+	PayloadDays    int   `yaml:"payload_days" json:"payload_days"`
+	TotalBytes     int64 `yaml:"total_bytes" json:"total_bytes"`
 }
 type Access struct {
 	BearerToken    string   `yaml:"bearer_token"`
 	TrustedProxies []string `yaml:"trusted_proxies"`
 }
 type Alerts struct {
-	Webhooks             []string `yaml:"webhooks"`
-	SourceSpikePerMinute int      `yaml:"source_spike_per_minute"`
+	Webhooks             []string `yaml:"webhooks" json:"webhooks"`
+	SourceSpikePerMinute int      `yaml:"source_spike_per_minute" json:"source_spike_per_minute"`
 }
 
 func Defaults() Config {
@@ -81,7 +84,15 @@ func Load(path string) (Config, error) {
 		return Config{}, err
 	}
 	c := Defaults()
-	if err = yaml.Unmarshal(b, &c); err != nil {
+	dec := yaml.NewDecoder(strings.NewReader(string(b)))
+	dec.KnownFields(true)
+	if err = dec.Decode(&c); err != nil {
+		return c, fmt.Errorf("parse config: %w", err)
+	}
+	if err = dec.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			err = fmt.Errorf("multiple YAML documents are not supported")
+		}
 		return c, fmt.Errorf("parse config: %w", err)
 	}
 	base := filepath.Dir(path)
@@ -121,24 +132,41 @@ func (c Config) Validate() error {
 	if c.Controller.Identity == "" || c.Controller.TLS.Cert == "" || c.Controller.TLS.Key == "" || c.Controller.TLS.CA == "" {
 		return fmt.Errorf("controller identity and TLS files are required")
 	}
-	if !strings.HasPrefix(c.Controller.HTTP, "127.0.0.1:") && !strings.HasPrefix(c.Controller.HTTP, "[::1]:") && !(os.Getenv("FYKE_CONTAINER") == "1" && strings.HasPrefix(c.Controller.HTTP, "0.0.0.0:")) {
+	if _, e := validTCPAddress("controller.grpc", c.Controller.GRPC); e != nil {
+		return e
+	}
+	httpHost, e := validTCPAddress("controller.http", c.Controller.HTTP)
+	if e != nil {
+		return e
+	}
+	if httpHost != "127.0.0.1" && httpHost != "::1" && !(os.Getenv("FYKE_CONTAINER") == "1" && httpHost == "0.0.0.0") {
 		return fmt.Errorf("controller.http must bind loopback (container exception requires FYKE_CONTAINER=1 and host loopback publishing)")
 	}
-	if !strings.HasPrefix(c.Controller.Metrics, "127.0.0.1:") && !strings.HasPrefix(c.Controller.Metrics, "[::1]:") {
+	metricsHost, e := validTCPAddress("controller.metrics", c.Controller.Metrics)
+	if e != nil {
+		return e
+	}
+	if metricsHost != "127.0.0.1" && metricsHost != "::1" {
 		return fmt.Errorf("controller.metrics must bind loopback")
 	}
-	if c.Limits.IdleTimeout <= 0 || c.Limits.SessionCap <= 0 || c.Limits.TranscriptBytes < 1024 || c.Limits.RequestBytes < 1024 || c.Limits.ArtifactBytes < 1024 {
+	if c.Limits.IdleTimeout <= 0 || c.Limits.SessionCap <= 0 || c.Limits.TranscriptBytes < 1024 || c.Limits.RequestBytes < 1024 || c.Limits.ArtifactBytes < 1024 || c.Limits.SpoolBytes < 1<<20 {
 		return fmt.Errorf("invalid limits")
 	}
 	if c.Limits.GlobalSessions < 1 || c.Limits.PerSourceSessions < 1 || c.Limits.PerSourceSessions > c.Limits.GlobalSessions {
 		return fmt.Errorf("invalid session concurrency")
 	}
-	if c.Retention.MetadataDays < 1 || c.Retention.TotalBytes < 1<<20 {
+	if c.Retention.MetadataDays < 1 || c.Retention.TranscriptDays < 1 || c.Retention.PCAPDays < 1 || c.Retention.PayloadDays < 1 || c.Retention.TotalBytes < 1<<20 {
 		return fmt.Errorf("invalid retention")
 	}
 	for id, s := range c.Sensors {
-		if id == "" || s.Listen == "" || s.Controller == "" {
+		if id == "" || s.Listen == "" || s.Controller == "" || s.TLS.Cert == "" || s.TLS.Key == "" || s.TLS.CA == "" {
 			return fmt.Errorf("sensor %q incomplete", id)
+		}
+		if _, e = validTCPAddress("sensor "+id+" listen", s.Listen); e != nil {
+			return e
+		}
+		if _, e = validTCPAddress("sensor "+id+" controller", s.Controller); e != nil {
+			return e
 		}
 		switch s.Protocol {
 		case "ssh", "telnet", "http", "https":
@@ -146,7 +174,26 @@ func (c Config) Validate() error {
 			return fmt.Errorf("sensor %q has unsupported protocol %q", id, s.Protocol)
 		}
 	}
-	for _, raw := range c.Alerts.Webhooks {
+	return c.Alerts.Validate()
+}
+
+func validTCPAddress(name, address string) (string, error) {
+	host, rawPort, e := net.SplitHostPort(address)
+	if e != nil || host == "" {
+		return "", fmt.Errorf("%s must be a host:port address", name)
+	}
+	port, e := strconv.Atoi(rawPort)
+	if e != nil || port < 1 || port > 65535 {
+		return "", fmt.Errorf("%s has an invalid TCP port", name)
+	}
+	return host, nil
+}
+
+func (a Alerts) Validate() error {
+	if a.SourceSpikePerMinute < 0 {
+		return fmt.Errorf("source_spike_per_minute cannot be negative")
+	}
+	for _, raw := range a.Webhooks {
 		u, err := url.Parse(raw)
 		if err != nil || u.Scheme != "https" || u.Host == "" {
 			return fmt.Errorf("alert webhook must use an absolute https URL")
