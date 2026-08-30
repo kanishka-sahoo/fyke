@@ -2,8 +2,59 @@ package controller
 
 import (
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+
+	"github.com/ksahoo/fyke/internal/config"
 )
+
+func TestSecurityAcceptsForwardedHeadersFromContainerHostGateway(t *testing.T) {
+	a := proxyTestAPI()
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "172.24.0.1:43122"
+	req.Header.Set("X-Forwarded-For", "100.64.0.10")
+	recorder := httptest.NewRecorder()
+
+	a.security(next).ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d; body: %s", recorder.Code, http.StatusNoContent, recorder.Body.String())
+	}
+}
+
+func TestSecurityRejectsForwardedHeadersFromPeerContainer(t *testing.T) {
+	a := proxyTestAPI()
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "172.24.0.4:43122"
+	req.Header.Set("X-Forwarded-For", "100.64.0.10")
+	recorder := httptest.NewRecorder()
+
+	a.security(next).ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body: %s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+	}
+}
+
+func proxyTestAPI() *API {
+	addrs := []net.Addr{
+		&net.IPNet{IP: net.ParseIP("172.24.0.3"), Mask: net.CIDRMask(16, 32)},
+	}
+	return &API{
+		cfg: config.Config{Access: config.Access{TrustedProxies: []string{"127.0.0.1", "::1"}}},
+		isTrustedLocalRequest: func(remoteAddr string) bool {
+			host, _, err := net.SplitHostPort(remoteAddr)
+			return err == nil && isDirectGateway(net.ParseIP(host), addrs)
+		},
+	}
+}
 
 func TestIsDirectGateway(t *testing.T) {
 	addrs := []net.Addr{

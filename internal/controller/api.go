@@ -21,15 +21,23 @@ import (
 )
 
 type API struct {
-	store       *store.Store
-	broker      *Broker
-	alertEngine *AlertEngine
-	cfg         config.Config
-	started     time.Time
+	store                 *store.Store
+	broker                *Broker
+	alertEngine           *AlertEngine
+	cfg                   config.Config
+	started               time.Time
+	isTrustedLocalRequest func(string) bool
 }
 
 func NewAPI(st *store.Store, b *Broker, alerts *AlertEngine, c config.Config) *API {
-	return &API{store: st, broker: b, alertEngine: alerts, cfg: c, started: time.Now()}
+	return &API{
+		store:                 st,
+		broker:                b,
+		alertEngine:           alerts,
+		cfg:                   c,
+		started:               time.Now(),
+		isTrustedLocalRequest: trustedLocalRequest,
+	}
 }
 func (a *API) Handler(ui http.Handler) http.Handler {
 	mux := http.NewServeMux()
@@ -53,7 +61,7 @@ func (a *API) Handler(ui http.Handler) http.Handler {
 }
 func (a *API) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if trustedLocalRequest(r.RemoteAddr) {
+		if a.trustedLocalRequest(r.RemoteAddr) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -65,6 +73,13 @@ func (a *API) auth(next http.Handler) http.Handler {
 		}
 		problem(w, http.StatusUnauthorized, "access denied")
 	})
+}
+
+func (a *API) trustedLocalRequest(remoteAddr string) bool {
+	if a.isTrustedLocalRequest != nil {
+		return a.isTrustedLocalRequest(remoteAddr)
+	}
+	return trustedLocalRequest(remoteAddr)
 }
 
 func trustedLocalRequest(remoteAddr string) bool {
@@ -138,7 +153,7 @@ func (a *API) trustedProxy(remote string) bool {
 			return true
 		}
 	}
-	return false
+	return a.trustedLocalRequest(remote)
 }
 func (a *API) overview(w http.ResponseWriter, r *http.Request) {
 	v, e := a.store.Overview(r.Context())

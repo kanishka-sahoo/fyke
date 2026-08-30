@@ -34,6 +34,15 @@ The dashboard deliberately stays on host loopback. From another machine, open it
 ssh -N -L 9080:127.0.0.1:9080 admin@your-vps
 ```
 
+Or publish it privately to your tailnet with Tailscale Serve (never Funnel):
+
+```sh
+sudo tailscale serve --bg http://127.0.0.1:9080
+tailscale serve status
+```
+
+Serve terminates HTTPS and forwards Tailscale identity headers to Fyke. Fyke accepts those headers only from loopback or the direct Docker host gateway; other containers and network peers cannot assert proxy identities.
+
 Useful operator commands are:
 
 ```sh
@@ -45,6 +54,13 @@ Useful operator commands are:
 ```
 
 The generated `.env` controls ports, runtime UID/GID, and the deployment directory; `.env.example` documents every supported value. Never change `FYKE_SSH_PORT` to `22` until an alternate private administration path has been tested. Persistent controller data and encrypted sensor spools live in named Docker volumes; `./deploy.sh stop` does not delete them.
+
+To update an existing checkout without replacing its deployment data:
+
+```sh
+git pull --ff-only
+./deploy.sh
+```
 
 Back up `deployment/controller.agekey` separately and securely. It is required to decrypt collected evidence and is intentionally never copied into a sensor container.
 
@@ -58,7 +74,7 @@ Back up `deployment/controller.agekey` separately and securely. It is required t
 - The shell module interprets a fixed command vocabulary against a read-only persona and per-session memory overlay. There is no command-execution adapter.
 - SFTP writes go to bounded encrypted quarantine. SCP execution is recorded and rejected. URLs are recorded and never fetched.
 - Artifact previews are escaped text or hex. Downloads always use `application/octet-stream` and `Content-Disposition: attachment`.
-- The dashboard is host-loopback only. Proxy identity headers are rejected unless the peer is configured as trusted.
+- The dashboard is host-loopback only. Proxy identity headers are rejected unless the peer is configured as trusted or is the verified local Docker host gateway.
 
 Fyke is evidence collection software, not a security boundary by itself. Apply the generated host firewall after verifying a private administration path.
 
@@ -95,7 +111,7 @@ FYKE_ROOT=./deployment FYKE_SSH_PORT=2222 FYKE_TELNET_PORT=2323 \
   FYKE_HTTP_PORT=8080 FYKE_HTTPS_PORT=8443 docker compose up -d
 ```
 
-Verify the dashboard locally at `http://127.0.0.1:9080`. For remote access, use an SSH tunnel or host-managed Tailscale Serve. Do not enable Funnel.
+Verify the dashboard locally at `http://127.0.0.1:9080`. For remote access, use an SSH tunnel or host-managed Tailscale Serve. Do not enable Funnel. The Quick start section includes both commands.
 
 ```sh
 ssh -N -L 9080:127.0.0.1:9080 admin@your-vps
