@@ -289,11 +289,12 @@ ip -4 address show | grep -Fqw "$FYKE_BIND_IP" || die "$FYKE_BIND_IP is not assi
 [[ "$FYKE_BIND_IP" != 0.0.0.0 && "$FYKE_BIND_IP" != 127.0.0.1 ]] || die "choose the public-facing interface address, not wildcard or loopback"
 ask FYKE_ADMIN_USER "Real OpenSSH username (Enter uses $(id -un)):"
 FYKE_ADMIN_USER="${FYKE_ADMIN_USER:-$(id -un)}"
-detected_dns=$(as_root tailscale status --json 2>/dev/null | sed -n 's/^[[:space:]]*"DNSName": "\([^"]*\)".*/\1/p' | head -n1)
-detected_dns="${detected_dns%.}"
-ask FYKE_TAILNET_HOST "VPS MagicDNS name (Enter uses ${detected_dns:-the current host}):"
-FYKE_TAILNET_HOST="${FYKE_TAILNET_HOST:-$detected_dns}"
-[[ -n "$FYKE_TAILNET_HOST" ]] || die "a MagicDNS name is required"
+tailnet_self=$(as_root tailscale status --self=true --peers=false --json 2>/dev/null) || die "could not read this node's Tailscale status"
+FYKE_TAILNET_HOST=$(sed -n 's/.*"DNSName":[[:space:]]*"\([^"]*\)".*/\1/p' <<<"$tailnet_self" | head -n1)
+FYKE_TAILNET_HOST="${FYKE_TAILNET_HOST%.}"
+[[ -n "$FYKE_TAILNET_HOST" ]] || die "Tailscale did not report a MagicDNS hostname for this node"
+[[ "$FYKE_TAILNET_HOST" != *[[:space:]/:]* ]] || die "Tailscale returned an invalid MagicDNS hostname"
+say "Discovered Tailscale hostname: $FYKE_TAILNET_HOST"
 ask TAILSCALE_ADMIN_PRINCIPAL "Tailscale user email or group allowed to administer Fyke:"
 [[ -n "$TAILSCALE_ADMIN_PRINCIPAL" ]] || die "an administrator principal is required"
 note "No password, SSH key, or Tailscale credential is collected or written."

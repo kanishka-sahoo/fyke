@@ -84,7 +84,7 @@ Run the guided cutover on the VPS:
 ./scripts/go-live.sh
 ```
 
-The wizard creates a root-only backup, asks for the IPv4 actually assigned to the public-facing host interface, walks through a least-privilege tailnet grant, creates both private paths, and requires a successful second SSH session before changing OpenSSH. It accounts for Ubuntu's `ssh.socket`, disables the old Tailscale SSH and HTTP-dashboard endpoints only after replacements work, writes `FYKE_BIND_IP` plus ports `22/23/80/443`, deploys, applies sensor-egress containment, and pauses for external verification.
+The wizard creates a root-only backup, asks for the IPv4 actually assigned to the public-facing host interface, automatically discovers the VPS MagicDNS hostname from the local Tailscale daemon, walks through a least-privilege tailnet grant, creates both private paths, and requires a successful second SSH session before changing OpenSSH. It accounts for Ubuntu's `ssh.socket`, disables the old Tailscale SSH and HTTP-dashboard endpoints only after replacements work, writes `FYKE_BIND_IP` plus ports `22/23/80/443`, deploys, applies sensor-egress containment, and pauses for external verification.
 
 Keep the original shell and a provider console open throughout the cutover. Tailscale grants are additive: adding an administrator-only grant does not cancel an existing broad allow rule, so review and narrow broader rules in the Access controls page. Tailscale Serve access follows the tailnet policy.
 
