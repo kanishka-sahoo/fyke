@@ -24,6 +24,7 @@ if [[ ! -f .env ]]; then
     echo "FYKE_ROOT=./deployment"
     echo "FYKE_UID=$(id -u)"
     echo "FYKE_GID=$(id -g)"
+    echo "FYKE_BIND_IP=0.0.0.0"
     echo "FYKE_SSH_PORT=2222"
     echo "FYKE_TELNET_PORT=2323"
     echo "FYKE_HTTP_PORT=8080"
@@ -35,7 +36,7 @@ fi
 while IFS='=' read -r key value; do
   [[ -z "$key" || "$key" == \#* ]] && continue
   case "$key" in
-    FYKE_ROOT|FYKE_UID|FYKE_GID|FYKE_SSH_PORT|FYKE_TELNET_PORT|FYKE_HTTP_PORT|FYKE_HTTPS_PORT)
+    FYKE_ROOT|FYKE_UID|FYKE_GID|FYKE_BIND_IP|FYKE_SSH_PORT|FYKE_TELNET_PORT|FYKE_HTTP_PORT|FYKE_HTTPS_PORT)
       printf -v "$key" '%s' "$value"
       export "$key"
       ;;
@@ -48,12 +49,36 @@ done <.env
 FYKE_ROOT="${FYKE_ROOT:-./deployment}"
 FYKE_UID="${FYKE_UID:-$(id -u)}"
 FYKE_GID="${FYKE_GID:-$(id -g)}"
-export FYKE_ROOT FYKE_UID FYKE_GID
+FYKE_BIND_IP="${FYKE_BIND_IP:-0.0.0.0}"
+export FYKE_ROOT FYKE_UID FYKE_GID FYKE_BIND_IP
 
 if [[ ! "$FYKE_UID" =~ ^[1-9][0-9]*$ || ! "$FYKE_GID" =~ ^[1-9][0-9]*$ ]]; then
   echo "FYKE_UID and FYKE_GID must be positive numeric IDs." >&2
   exit 1
 fi
+
+valid_ipv4() {
+  local address="$1" octet
+  local -a octets
+  [[ "$address" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+  IFS=. read -r -a octets <<<"$address"
+  for octet in "${octets[@]}"; do
+    (( 10#$octet <= 255 )) || return 1
+  done
+}
+
+if ! valid_ipv4 "$FYKE_BIND_IP"; then
+  echo "FYKE_BIND_IP must be an IPv4 address." >&2
+  exit 1
+fi
+
+if [[ "$FYKE_BIND_IP" != 0.0.0.0 ]]; then
+  if ! command -v ip >/dev/null 2>&1 || ! ip -4 address show | grep -Fqw "$FYKE_BIND_IP"; then
+    echo "FYKE_BIND_IP must be assigned to a host interface; use the interface address rather than a cloud NAT address." >&2
+    exit 1
+  fi
+fi
+
 for port_name in FYKE_SSH_PORT FYKE_TELNET_PORT FYKE_HTTP_PORT FYKE_HTTPS_PORT; do
   port="${!port_name:-}"
   if [[ ! "$port" =~ ^[0-9]+$ || "$port" -lt 1 || "$port" -gt 65535 ]]; then
@@ -61,6 +86,11 @@ for port_name in FYKE_SSH_PORT FYKE_TELNET_PORT FYKE_HTTP_PORT FYKE_HTTPS_PORT; 
     exit 1
   fi
 done
+
+if [[ "$FYKE_SSH_PORT" == 22 && ( "$FYKE_BIND_IP" == 0.0.0.0 || "$FYKE_BIND_IP" == 127.* ) ]]; then
+  echo "Refusing to publish Fyke SSH on wildcard or loopback port 22. Set FYKE_BIND_IP to the public-facing host IPv4 after private administration has been verified." >&2
+  exit 1
+fi
 
 case "$FYKE_ROOT" in
   /|.|..|"")
@@ -141,11 +171,16 @@ docker compose config --quiet
 docker compose up -d --wait
 
 echo
-echo "Fyke is running on safe validation ports:"
+echo "Fyke is running:"
+echo "  Sensor bind: ${FYKE_BIND_IP}"
 echo "  Dashboard: http://127.0.0.1:9080"
 echo "  SSH:       ${FYKE_SSH_PORT:-2222}"
 echo "  Telnet:    ${FYKE_TELNET_PORT:-2323}"
 echo "  HTTP:      ${FYKE_HTTP_PORT:-8080}"
 echo "  HTTPS:     ${FYKE_HTTPS_PORT:-8443}"
 echo
-echo "Review .env and the README before moving SSH to port 22 or applying the host firewall."
+if [[ "$FYKE_SSH_PORT" == 22 ]]; then
+  echo "Live SSH is published only on ${FYKE_BIND_IP}:22. Re-run scripts/go-live.sh verification before closing the administration shell."
+else
+  echo "These are validation ports. Run scripts/go-live.sh before moving SSH to public port 22."
+fi

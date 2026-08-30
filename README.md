@@ -51,9 +51,10 @@ Useful operator commands are:
 ./deploy.sh stop
 ./deploy.sh firewall          # print and review the generated rules
 ./deploy.sh firewall apply    # explicitly apply them with nftables
+./scripts/go-live.sh          # guided, rollback-aware live port cutover
 ```
 
-The generated `.env` controls ports, runtime UID/GID, and the deployment directory; `.env.example` documents every supported value. Never change `FYKE_SSH_PORT` to `22` until an alternate private administration path has been tested. Persistent controller data and encrypted sensor spools live in named Docker volumes; `./deploy.sh stop` does not delete them.
+The generated `.env` controls the sensor bind address, ports, runtime UID/GID, and deployment directory; `.env.example` documents every supported value. Never change `FYKE_SSH_PORT` to `22` until an alternate private administration path has been tested. `deploy.sh` refuses wildcard `0.0.0.0:22`; a live deployment must name the public-facing host IPv4 explicitly. Persistent controller data and encrypted sensor spools live in named Docker volumes; `./deploy.sh stop` does not delete them.
 
 To update an existing checkout without replacing its deployment data:
 
@@ -63,6 +64,31 @@ git pull --ff-only
 ```
 
 Back up `deployment/controller.agekey` separately and securely. It is required to decrypt collected evidence and is intentionally never copied into a sensor container.
+
+## Go live with Tailscale-only administration
+
+The supported cutover keeps real OpenSSH on host loopback and uses Tailscale Serve as its only remote path. Fyke binds the public-facing IPv4 separately, so the real and emulated SSH services can both use port 22 on different addresses:
+
+| Reachability | Port | Destination |
+| --- | ---: | --- |
+| Public internet | `22` | Fyke SSH sensor |
+| Public internet | `23` | Fyke Telnet sensor |
+| Public internet | `80` | Fyke HTTP sensor |
+| Public internet | `443` | Fyke HTTPS sensor |
+| Tailnet only | `22222` | Tailscale TCP proxy to real OpenSSH on `127.0.0.1:22` |
+| Tailnet only | HTTPS `443` | Tailscale HTTPS proxy to the dashboard on `127.0.0.1:9080` |
+
+Run the guided cutover on the VPS:
+
+```sh
+./scripts/go-live.sh
+```
+
+The wizard creates a root-only backup, asks for the IPv4 actually assigned to the public-facing host interface, walks through a least-privilege tailnet grant, creates both private paths, and requires a successful second SSH session before changing OpenSSH. It accounts for Ubuntu's `ssh.socket`, disables the old Tailscale SSH and HTTP-dashboard endpoints only after replacements work, writes `FYKE_BIND_IP` plus ports `22/23/80/443`, deploys, applies sensor-egress containment, and pauses for external verification.
+
+Keep the original shell and a provider console open throughout the cutover. Tailscale grants are additive: adding an administrator-only grant does not cancel an existing broad allow rule, so review and narrow broader rules in the Access controls page. Tailscale Serve access follows the tailnet policy.
+
+The explicit bind currently publishes the honeypot on IPv4 only. Leave unsolicited public IPv6 inbound closed unless you deliberately add and validate equivalent IPv6 sensor bindings. Do not delete the wizard's `/var/backups/fyke-cutover-*` directory until a reboot has completed and both private paths have been retested.
 
 ## Security model
 
@@ -92,7 +118,7 @@ The Docker build compiles the React/Tailwind dashboard and then produces a CGO-f
 
 ## Manual initialization and startup
 
-Never claim public port 22 until you have verified Tailscale or alternate-port SSH administration. Fyke does not modify `sshd`.
+Never claim public port 22 until you have verified Tailscale or alternate-port SSH administration. The Fyke binary and `deploy.sh` do not modify `sshd`; the explicit `scripts/go-live.sh` cutover does so only after confirmation, validation, and backup.
 
 ```sh
 ./fyke init --dir ./deployment
@@ -100,14 +126,20 @@ Never claim public port 22 until you have verified Tailscale or alternate-port S
 export FYKE_ROOT=./deployment
 export FYKE_UID=$(id -u)
 export FYKE_GID=$(id -g)
+export FYKE_BIND_IP=0.0.0.0
+export FYKE_SSH_PORT=2222
+export FYKE_TELNET_PORT=2323
+export FYKE_HTTP_PORT=8080
+export FYKE_HTTPS_PORT=8443
 docker compose build
 docker compose up -d
 ```
 
-The default public mappings are 22, 23, 80, and 443. Override them while validating a deployment:
+The Compose fallback mappings are 22, 23, 80, and 443, while `deploy.sh` and the manual example above use safe validation mappings. To run without exporting the variables into your shell, use the equivalent one-shot form:
 
 ```sh
-FYKE_ROOT=./deployment FYKE_SSH_PORT=2222 FYKE_TELNET_PORT=2323 \
+FYKE_ROOT=./deployment FYKE_BIND_IP=0.0.0.0 \
+  FYKE_SSH_PORT=2222 FYKE_TELNET_PORT=2323 \
   FYKE_HTTP_PORT=8080 FYKE_HTTPS_PORT=8443 docker compose up -d
 ```
 
