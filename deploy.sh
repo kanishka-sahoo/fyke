@@ -14,7 +14,8 @@ if ! docker compose version >/dev/null 2>&1; then
   exit 1
 fi
 if ! docker info >/dev/null 2>&1; then
-  echo "The Docker daemon is unavailable to this user. Start Docker, then log out and back in if you were just added to the docker group." >&2
+  echo "Docker is not running, or your user cannot use Docker." >&2
+  echo "Start Docker. If your user just joined the docker group, log out and log in again." >&2
   exit 1
 fi
 
@@ -30,7 +31,7 @@ if [[ ! -f .env ]]; then
     echo "FYKE_HTTP_PORT=8080"
     echo "FYKE_HTTPS_PORT=8443"
   } >.env
-  echo "Created .env with safe, non-privileged validation ports."
+  echo "Created .env with safe test ports above 1024."
 fi
 
 while IFS='=' read -r key value; do
@@ -74,7 +75,8 @@ fi
 
 if [[ "$FYKE_BIND_IP" != 0.0.0.0 ]]; then
   if ! command -v ip >/dev/null 2>&1 || ! ip -4 address show | grep -Fqw "$FYKE_BIND_IP"; then
-    echo "FYKE_BIND_IP must be assigned to a host interface; use the interface address rather than a cloud NAT address." >&2
+    echo "FYKE_BIND_IP must be an address on this VPS." >&2
+    echo "Use the address of the public interface. Do not use a cloud NAT address." >&2
     exit 1
   fi
 fi
@@ -88,7 +90,8 @@ for port_name in FYKE_SSH_PORT FYKE_TELNET_PORT FYKE_HTTP_PORT FYKE_HTTPS_PORT; 
 done
 
 if [[ "$FYKE_SSH_PORT" == 22 && ( "$FYKE_BIND_IP" == 0.0.0.0 || "$FYKE_BIND_IP" == 127.* ) ]]; then
-  echo "Refusing to publish Fyke SSH on wildcard or loopback port 22. Set FYKE_BIND_IP to the public-facing host IPv4 after private administration has been verified." >&2
+  echo "Fyke will not put fake SSH on 0.0.0.0:22 or 127.0.0.1:22." >&2
+  echo "First, test private access to real SSH. Then set FYKE_BIND_IP to the public-facing IPv4 address." >&2
   exit 1
 fi
 
@@ -131,7 +134,7 @@ if [[ "$ACTION" == firewall ]]; then
   if [[ "${2:-}" != apply ]]; then
     cat "$RULES_FILE"
     echo
-    echo "Review the rules above, then apply them explicitly with: ./deploy.sh firewall apply"
+    echo "Read the rule above. To install it, run: ./deploy.sh firewall apply"
     exit 0
   fi
   if ! command -v nft >/dev/null 2>&1; then
@@ -147,13 +150,14 @@ if [[ "$ACTION" == firewall ]]; then
     sudo nft delete table inet fyke 2>/dev/null || true
     sudo nft -f "$RULES_FILE"
   fi
-  echo "Fyke sensor egress policy applied."
+  echo "Installed the Fyke sensor firewall rule."
   exit 0
 fi
 
 if [[ ! -f "$DEPLOYMENT_DIR/config.yaml" ]]; then
   if [[ -n "$(find "$DEPLOYMENT_DIR" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
-    echo "$DEPLOYMENT_DIR is non-empty but has no config.yaml; refusing to overwrite it." >&2
+    echo "$DEPLOYMENT_DIR contains files but has no config.yaml." >&2
+    echo "Fyke will not overwrite this directory." >&2
     exit 1
   fi
   docker run --rm \
@@ -180,7 +184,8 @@ echo "  HTTP:      ${FYKE_HTTP_PORT:-8080}"
 echo "  HTTPS:     ${FYKE_HTTPS_PORT:-8443}"
 echo
 if [[ "$FYKE_SSH_PORT" == 22 ]]; then
-  echo "Live SSH is published only on ${FYKE_BIND_IP}:22. Re-run scripts/go-live.sh verification before closing the administration shell."
+  echo "Fake SSH is available on ${FYKE_BIND_IP}:22."
+  echo "Run the tests in scripts/go-live.sh before you close the administrator SSH window."
 else
-  echo "These are validation ports. Run scripts/go-live.sh before moving SSH to public port 22."
+  echo "These are safe test ports. Run scripts/go-live.sh before you use public port 22."
 fi

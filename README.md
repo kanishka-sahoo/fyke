@@ -1,16 +1,20 @@
 # Fyke
 
-Fyke is a single-host, non-executing SSH, Telnet, HTTP, and HTTPS honeypot for a dedicated Debian or Ubuntu VPS. Sensors accept hostile traffic, emulate a coherent fictional machine, and stream normalized evidence to a private controller. Attacker input is never passed to a host or container shell.
+Fyke is a honeypot for one Debian or Ubuntu VPS. It provides fake SSH, Telnet, HTTP, and HTTPS services. All fake services show the same fictional system. Each sensor sends normalized evidence to a private controller. Fyke never sends attacker input to a host shell or a container shell.
 
-## Why “Fyke”?
+## Why "Fyke"?
 
-A **fyke** is a long, bag-shaped fish trap made of netting held open by a series of circular hoops. The name fits this project: Fyke presents an inviting, contained path for hostile traffic, then holds and records the resulting evidence without letting attacker input reach a real shell.
+A **fyke** is a long, bag-shaped fish trap. Netting forms the bag. Circular hoops hold the bag open.
 
-The project is licensed under Apache-2.0.
+The name describes how this project works. Fyke gives hostile traffic an inviting path. It contains the traffic and records the evidence. It does not give the attacker a real shell.
+
+Fyke uses the Apache-2.0 license.
 
 ## Quick start
 
-The supported deployment target is a dedicated Debian or Ubuntu VPS. A standard deployment only requires Docker Engine with Compose v2; Go and Node are needed only for local development.
+Use a dedicated Debian or Ubuntu VPS. The VPS must have Docker Engine and Docker Compose v2. You need Go and Node only for development.
+
+Run these commands:
 
 ```sh
 git clone https://github.com/ksahoo/fyke.git
@@ -18,95 +22,151 @@ cd fyke
 ./deploy.sh
 ```
 
-If Docker is not installed, run `./install-docker.sh` first, then log out and back in if the installer adds you to the `docker` group.
+If Docker is not installed, run this command first:
 
-The deployment helper builds the pinned image, creates a private deployment directory and identities on first run, validates them with `fyke doctor`, waits for the controller to become ready, and starts the sensors on safe validation ports:
+```sh
+./install-docker.sh
+```
 
-- Dashboard: `http://127.0.0.1:9080`
-- SSH: `2222`
-- Telnet: `2323`
-- HTTP: `8080`
-- HTTPS: `8443`
+The installer can add your user to the `docker` group. If it does, log out and log in again. Then run `./deploy.sh`.
 
-The dashboard deliberately stays on host loopback. From another machine, open it through the VPS administration channel:
+On the first run, `deploy.sh` does these tasks:
+
+- It builds the Fyke container image from fixed dependency versions.
+- It creates a private deployment directory.
+- It creates the configuration, persona, keys, and certificates.
+- It runs `fyke doctor` to check the new files.
+- It waits for the controller to become ready.
+- It starts the sensors on safe test ports.
+
+The safe test ports are:
+
+| Service | Address or port |
+| --- | ---: |
+| Dashboard | `http://127.0.0.1:9080` |
+| Fake SSH | `2222` |
+| Fake Telnet | `2323` |
+| Fake HTTP | `8080` |
+| Fake HTTPS | `8443` |
+
+The dashboard listens on the local address only. To open it from another computer, create an SSH tunnel:
 
 ```sh
 ssh -N -L 9080:127.0.0.1:9080 admin@your-vps
 ```
 
-Or publish it privately to your tailnet with Tailscale Serve (never Funnel):
+You can also use Tailscale Serve:
 
 ```sh
 sudo tailscale serve --bg http://127.0.0.1:9080
 tailscale serve status
 ```
 
-Serve terminates HTTPS and forwards Tailscale identity headers to Fyke. Fyke accepts those headers only from loopback or the direct Docker host gateway; other containers and network peers cannot assert proxy identities.
+Do not use Tailscale Funnel. Funnel would make the dashboard public.
 
-Useful operator commands are:
+Tailscale Serve ends the HTTPS connection and sends Tailscale identity headers to Fyke. Fyke trusts these headers only from the local address or the direct Docker host gateway. Other containers and network peers cannot set a trusted proxy identity.
+
+Use these commands to operate Fyke:
 
 ```sh
-./deploy.sh status
-./deploy.sh logs
-./deploy.sh stop
-./deploy.sh firewall          # print and review the generated rules
-./deploy.sh firewall apply    # explicitly apply them with nftables
-./scripts/go-live.sh          # guided, rollback-aware live port cutover
+./deploy.sh status             # Show the containers.
+./deploy.sh logs               # Show new log entries.
+./deploy.sh stop               # Stop Fyke.
+./deploy.sh firewall           # Show the proposed firewall rule.
+./deploy.sh firewall apply     # Install the firewall rule.
+./scripts/go-live.sh           # Move Fyke to the public ports.
 ```
 
-The generated `.env` controls the sensor bind address, ports, runtime UID/GID, and deployment directory; `.env.example` documents every supported value. Never change `FYKE_SSH_PORT` to `22` until an alternate private administration path has been tested. `deploy.sh` refuses wildcard `0.0.0.0:22`; a live deployment must name the public-facing host IPv4 explicitly. Persistent controller data and encrypted sensor spools live in named Docker volumes; `./deploy.sh stop` does not delete them.
+The `.env` file contains the sensor address, ports, user ID, group ID, and deployment directory. See `.env.example` for all settings.
 
-To update an existing checkout without replacing its deployment data:
+Do not set `FYKE_SSH_PORT=22` until you test private access to real SSH. `deploy.sh` blocks `0.0.0.0:22` and `127.0.0.1:22`. For public port 22, set `FYKE_BIND_IP` to the public-facing IPv4 address on the VPS.
+
+Fyke keeps controller data and encrypted sensor queues in named Docker volumes. `./deploy.sh stop` does not delete these volumes.
+
+To update Fyke, run:
 
 ```sh
 git pull --ff-only
 ./deploy.sh
 ```
 
-Back up `deployment/controller.agekey` separately and securely. It is required to decrypt collected evidence and is intentionally never copied into a sensor container.
+Save a separate copy of `deployment/controller.agekey`. Keep this copy in a secure place. You need this key to decrypt the collected evidence. Fyke never copies this key into a sensor container.
 
-## Go live with Tailscale-only administration
+## Use the public ports
 
-The supported cutover keeps real OpenSSH on host loopback and uses Tailscale Serve as its only remote path. Fyke binds the public-facing IPv4 separately, so the real and emulated SSH services can both use port 22 on different addresses:
+Your tailnet is your private Tailscale network. MagicDNS gives each device in the tailnet a private DNS name.
 
-| Reachability | Port | Destination |
+The recommended setup keeps real OpenSSH on the local address. Tailscale Serve is the only remote path to real OpenSSH. Fyke uses the public-facing IPv4 address.
+
+The public-facing IPv4 address must be an address on a VPS network interface. Do not use a cloud NAT address that is not on the VPS.
+
+This design lets real SSH and fake SSH use port 22 on different addresses:
+
+| Who can connect | Port | Service |
 | --- | ---: | --- |
 | Public internet | `22` | Fyke SSH sensor |
 | Public internet | `23` | Fyke Telnet sensor |
 | Public internet | `80` | Fyke HTTP sensor |
 | Public internet | `443` | Fyke HTTPS sensor |
-| Tailnet only | `22222` | Tailscale TCP proxy to real OpenSSH on `127.0.0.1:22` |
-| Tailnet only | HTTPS `443` | Tailscale HTTPS proxy to the dashboard on `127.0.0.1:9080` |
+| Allowed tailnet users | `22222` | Real OpenSSH through Tailscale |
+| Allowed tailnet users | HTTPS `443` | Fyke dashboard through Tailscale |
 
-Run the guided cutover on the VPS:
+Run this script on the VPS:
 
 ```sh
 ./scripts/go-live.sh
 ```
 
-The wizard creates a root-only backup, asks for the IPv4 actually assigned to the public-facing host interface, automatically discovers the VPS MagicDNS hostname from the local Tailscale daemon, walks through a least-privilege tailnet grant, creates both private paths, and requires a successful second SSH session before changing OpenSSH. It accounts for Ubuntu's `ssh.socket`, disables the old Tailscale SSH and HTTP-dashboard endpoints only after replacements work, writes `FYKE_BIND_IP` plus ports `22/23/80/443`, deploys, applies sensor-egress containment, and pauses for external verification.
+The script reads the VPS MagicDNS name from the local Tailscale service. It does not contain a fixed tailnet domain.
 
-Keep the original shell and a provider console open throughout the cutover. Tailscale grants are additive: adding an administrator-only grant does not cancel an existing broad allow rule, so review and narrow broader rules in the Access controls page. Tailscale Serve access follows the tailnet policy.
+The script guides you through these tasks:
 
-The explicit bind currently publishes the honeypot on IPv4 only. Leave unsolicited public IPv6 inbound closed unless you deliberately add and validate equivalent IPv6 sensor bindings. Do not delete the wizard's `/var/backups/fyke-cutover-*` directory until a reboot has completed and both private paths have been retested.
+1. Check the required programs and network values.
+2. Save a backup that only root can read.
+3. Limit access in the Tailscale policy.
+4. Create private access to real SSH and the dashboard.
+5. Test both private connections from a second device.
+6. Move real OpenSSH to the local address.
+7. Remove the old Tailscale connections.
+8. Start Fyke on public ports 22, 23, 80, and 443.
+9. Install the sensor firewall rule.
+10. Test the finished setup.
 
-## Security model
+Keep the first SSH window open while you use the script. Also open the provider console before you start. The provider console gives you access if an SSH test fails.
 
-- Sensors expose one protocol each and cannot write SQLite.
-- Sensor events and health heartbeats cross a versioned bidirectional gRPC stream authenticated by TLS certificates whose DNS SAN is `sensor.<id>`.
-- Every event has a UUIDv7 ID plus a unique sensor, session, and sequence tuple. Replay is idempotent.
-- Disconnected sensors spool encrypted records up to 512 MiB. A full spool backpressures the protocol path instead of silently deleting unacknowledged evidence.
-- The controller leaves routing and investigation metadata searchable, while sealing credentials, command arguments, bodies, transcripts, and uploads to its generated X25519 age identity.
-- The shell module interprets a fixed command vocabulary against a read-only persona and per-session memory overlay. There is no command-execution adapter.
-- SFTP writes go to bounded encrypted quarantine. SCP execution is recorded and rejected. URLs are recorded and never fetched.
-- Artifact previews are escaped text or hex. Downloads always use `application/octet-stream` and `Content-Disposition: attachment`.
-- The dashboard is host-loopback only. Proxy identity headers are rejected unless the peer is configured as trusted or is the verified local Docker host gateway.
+Tailscale grants add access. A new grant does not cancel an old grant or ACL. Check all rules that apply to the VPS. Remove access that is not required.
 
-Fyke is evidence collection software, not a security boundary by itself. Apply the generated host firewall after verifying a private administration path.
+The public Fyke services listen on IPv4 only. Keep public IPv6 input blocked unless you add and test IPv6 sensor addresses.
+
+The script saves backups in `/var/backups/fyke-public-setup-*`. Keep the backup until you restart the VPS. After the restart, test real SSH and the dashboard again.
+
+## Security design
+
+- Each sensor provides one protocol. A sensor cannot write to SQLite.
+- Sensors use a versioned, two-way gRPC stream. They send events and health messages on this stream.
+- TLS certificates authenticate the gRPC stream. Each sensor certificate has the DNS SAN `sensor.<id>`.
+- Each event has a UUIDv7 ID. It also has a unique sensor, session, and sequence value.
+- Fyke can receive the same event again without creating a second copy.
+- A disconnected sensor keeps up to 512 MiB of encrypted records.
+- If the sensor queue is full, the protocol waits. Fyke does not delete evidence that the controller has not received.
+- The controller keeps routing and investigation data searchable.
+- The controller encrypts credentials, command arguments, bodies, transcripts, and uploads with its X25519 age identity.
+- The fake shell uses a fixed command list, a read-only persona, and temporary session memory.
+- The fake shell has no adapter that can run a command.
+- SFTP writes go to an encrypted quarantine with a size limit.
+- Fyke records and rejects SCP execution.
+- Fyke records URLs but never fetches them.
+- Artifact previews contain escaped text or hexadecimal data.
+- Artifact downloads use `application/octet-stream` and `Content-Disposition: attachment`.
+- The dashboard listens on the local host only.
+- Fyke rejects proxy identity headers from an untrusted peer.
+- Fyke trusts the verified local Docker host gateway when it acts as the proxy.
+
+Fyke collects evidence. It is not a complete security boundary. Test private administrator access before you install the Fyke host firewall rule.
 
 ## Build from source
 
-Developer prerequisites are Go 1.24+, Node 24+, and Docker Compose v2.
+For development, install Go 1.24 or later, Node 24 or later, and Docker Compose v2.
 
 ```sh
 make ui
@@ -114,11 +174,13 @@ make test
 make build
 ```
 
-The Docker build compiles the React/Tailwind dashboard and then produces a CGO-free distroless image.
+The Docker build compiles the React and Tailwind dashboard. It then builds a CGO-free program in a distroless image.
 
-## Manual initialization and startup
+## Start Fyke without deploy.sh
 
-Never claim public port 22 until you have verified Tailscale or alternate-port SSH administration. The Fyke binary and `deploy.sh` do not modify `sshd`; the explicit `scripts/go-live.sh` cutover does so only after confirmation, validation, and backup.
+Do not use public port 22 until you test private access to real SSH. The `fyke` program and `deploy.sh` do not change OpenSSH. Only `scripts/go-live.sh` changes OpenSSH. It asks for approval, checks the new settings, and saves a backup first.
+
+Use safe test ports for the first manual start:
 
 ```sh
 ./fyke init --dir ./deployment
@@ -135,7 +197,7 @@ docker compose build
 docker compose up -d
 ```
 
-The Compose fallback mappings are 22, 23, 80, and 443, while `deploy.sh` and the manual example above use safe validation mappings. To run without exporting the variables into your shell, use the equivalent one-shot form:
+You can also set the values for one command:
 
 ```sh
 FYKE_ROOT=./deployment FYKE_BIND_IP=0.0.0.0 \
@@ -143,34 +205,43 @@ FYKE_ROOT=./deployment FYKE_BIND_IP=0.0.0.0 \
   FYKE_HTTP_PORT=8080 FYKE_HTTPS_PORT=8443 docker compose up -d
 ```
 
-Verify the dashboard locally at `http://127.0.0.1:9080`. For remote access, use an SSH tunnel or host-managed Tailscale Serve. Do not enable Funnel. The Quick start section includes both commands.
+The Compose file uses ports 22, 23, 80, and 443 if you do not set port values. `deploy.sh` and the examples above use safe test ports.
+
+On the VPS, open `http://127.0.0.1:9080` to test the dashboard. For remote access, use an SSH tunnel or Tailscale Serve. Do not use Tailscale Funnel.
+
+After you test private administrator access, show the sensor firewall rule:
 
 ```sh
-ssh -N -L 9080:127.0.0.1:9080 admin@your-vps
+sudo ./fyke firewall print --config ./deployment/config.yaml
 ```
 
-After confirming private administration and normal controller ingestion, explicitly install the IPv4/IPv6 sensor egress policy:
+Read the rule. Then install it:
 
 ```sh
 sudo ./fyke firewall apply --config ./deployment/config.yaml
 ```
 
-The rule set permits established traffic, leaves the internal controller bridge alone, and drops forwarded traffic originating on the public sensor bridge. Review `fyke firewall print` output before applying it.
+The rule permits established traffic. It does not change the private controller bridge. It blocks forwarded traffic from the public sensor bridge.
 
 ## Commands
 
-| Command | Purpose |
+| Command | Action |
 | --- | --- |
-| `fyke init` | Generate the fictional persona, local CA, mTLS identities, SSH host identity, age identity, and validated configuration. |
-| `fyke controller` | Run the single SQLite writer, gRPC ingestion, API, dashboard, alerts, retention, metrics, liveness, and readiness. |
-| `fyke sensor --id ID` | Run one configured protocol sensor with its encrypted spool. |
-| `fyke doctor` | Validate configuration, persona, identities, and deployment warnings. |
-| `fyke firewall print` / `apply` | Review or explicitly install the nftables sensor egress policy. |
-| `fyke export` | Export normalized JSONL or CSV. `--include-sensitive` is explicit and audit logged. |
-| `fyke backup` | Create a consistent database and artifact tar stream encrypted to an operator recovery recipient. |
-| `fyke restore` | Decrypt, reject unsafe archive paths, verify every manifest hash, and restore into an empty directory. |
+| `fyke init` | Create the persona, local CA, mTLS identities, SSH host identity, age identity, and configuration. |
+| `fyke controller` | Run the single SQLite writer, gRPC input, API, dashboard, alerts, retention, metrics, and health checks. |
+| `fyke sensor --id ID` | Run one protocol sensor and its encrypted queue. |
+| `fyke doctor` | Check the configuration, persona, identities, and deployment warnings. |
+| `fyke firewall print` | Show the sensor firewall rule. |
+| `fyke firewall apply` | Install the sensor firewall rule. |
+| `fyke export` | Export normalized JSONL or CSV. |
+| `fyke backup` | Create a consistent database and artifact tar stream. Encrypt it for a recovery recipient. |
+| `fyke restore` | Check and restore a backup into an empty directory. |
 
-For a backup, first stop the controller so the database and artifact set cannot change between the SQLite snapshot and manifest walk:
+`fyke export --include-sensitive` includes sensitive evidence. You must select this option. Fyke records the action in the audit log.
+
+## Back up and restore data
+
+Stop the controller before a backup. This stops changes to the database and artifacts during the backup.
 
 ```sh
 FYKE_ROOT=./deployment docker compose stop controller
@@ -179,55 +250,113 @@ FYKE_ROOT=./deployment docker compose stop controller
 FYKE_ROOT=./deployment docker compose start controller
 ```
 
-Restore stays offline and refuses a non-empty target:
+Restore a backup while Fyke is offline. The target directory must be empty.
 
 ```sh
 ./fyke restore --backup fyke-2026-08-28.tar.age \
   --identity recovery.agekey --target ./restored-data
 ```
 
-## API and operations
+During a restore, Fyke rejects unsafe archive paths. It also checks each file hash in the manifest.
 
-The controller serves `/api/v1` on loopback. Main resources are:
+## API and operation
+
+The controller provides `/api/v1` on the local address. The main resources are:
 
 - `GET /overview`, `/events`, `/sessions`, `/sources`, `/artifacts`, and `/alerts`
-- `GET /stream` for server-sent live events
+- `GET /stream` for the live server-sent event stream
 - `GET /artifacts/{id}/preview` and `/download`
 - `GET /exports?format=jsonl|csv&sensitive=false`
 - `GET /health`, `/retention`, and `/preferences/alerts`
 - `POST /retention/run` and `PUT /preferences/alerts`
 
-The private metrics listener exposes `/metrics`, `/livez`, and `/readyz` at the configured loopback address. Compose uses `/readyz` to hold sensors until the controller is healthy. Alert templates cover successful emulated login, artifact upload, novel public-key fingerprint, source spikes, and unhealthy sensors. Sensor health transitions and alert preferences persist across restarts. HTTPS webhook delivery has a bounded queue, bounded exponential retries, and a stable event ID idempotency key.
+The private metrics service provides `/metrics`, `/livez`, and `/readyz`. It listens on the configured local address. Docker Compose waits for `/readyz` before it starts the sensors.
 
-SQLite uses WAL, full synchronous durability, transactional migrations, normalized indexes, FTS5 metadata search, one serialized writer path, and integrity checks. Defaults retain metadata for 180 days, transcripts for 90 days, payloads for 30 days, and submitted PCAP evidence for 14 days. The 20 GiB cap measures the complete controller data directory; encrypted evidence is evicted in priority order before old event metadata, and SQLite is compacted when metadata must be removed.
+Fyke can alert on these events:
+
+- A successful fake login
+- An artifact upload
+- A new public-key fingerprint
+- A source traffic spike
+- An unhealthy sensor
+
+Fyke saves sensor health changes and alert preferences. These values remain after a restart.
+
+The HTTPS webhook queue has a fixed size. Failed requests use bounded exponential retries. Each request has a stable event ID for idempotency.
+
+SQLite uses WAL and full synchronous durability. Fyke uses transactions for migrations. It also uses normalized indexes, FTS5 metadata search, one serialized writer, and integrity checks.
+
+The default retention periods are:
+
+| Data | Retention period |
+| --- | ---: |
+| Metadata | 180 days |
+| Transcripts | 90 days |
+| Payloads | 30 days |
+| Submitted PCAP evidence | 14 days |
+
+The default storage limit is 20 GiB. Fyke measures the complete controller data directory. It removes encrypted evidence in priority order before it removes old event metadata. Fyke compacts SQLite when it must remove metadata.
 
 ## Personas
 
-Persona packs are versioned YAML, not executable plugins. A pack defines the fictional host, users, read-only filesystem, honey credentials, HTTP routes, and protocol banners. Validation rejects path traversal, executable filesystem entries, unknown HTTP methods, and unsupported pack versions.
+A persona pack is a versioned YAML file. It is not an executable plugin.
 
-Honey credentials authenticate immediately. Otherwise, the third failed attempt from one source and protocol inside ten minutes opens an emulated session.
+A persona defines the fake host, users, read-only file system, honey credentials, HTTP routes, and protocol banners. Fyke rejects path traversal, executable file entries, unknown HTTP methods, and unsupported persona versions.
 
-## Current acceptance coverage
+Honey credentials open a fake session immediately. Other credentials fail two times. The third failed attempt opens a fake session. The three attempts must use one source and one protocol within ten minutes.
 
-Automated tests cover UUIDv7 ordering, strict configuration parsing, generated deployment identities, persona path safety, shell syntax rejection, URL non-fetch behavior, authentication windows, session limits, authenticated health heartbeats, health-alert transitions, persisted alert preferences, encrypted spooling and replay, age sealing, SQLite deduplication, evidence-at-rest encryption, the full on-disk retention cap, Telnet negotiation, and bounded HTTP raw capture. Run all seed corpora and tests with `go test ./...`; run sustained fuzzing with standard Go fuzz flags.
+## Test coverage
 
-Fyke does not ship a packet-capture profile and grants no sensor `NET_RAW` capability. The `pcap_days` retention setting only governs `pcap` evidence submitted by a separately developed, mutually authenticated sensor. Any packet-capture extension requires deployment-specific containment validation. The full 500-session/100-event-per-second target-VPS benchmark also remains an operator-run acceptance test rather than part of the default Compose startup.
+Automated tests cover these functions:
+
+- UUIDv7 ordering
+- Strict configuration parsing
+- Generated deployment identities
+- Persona path safety
+- Shell syntax rejection
+- URL non-fetch behavior
+- Authentication time windows
+- Session limits
+- Authenticated health messages
+- Health alert changes
+- Saved alert preferences
+- Encrypted sensor queues and replay
+- Age encryption
+- SQLite duplicate rejection
+- Encryption of stored evidence
+- The complete storage limit
+- Telnet negotiation
+- Bounded HTTP raw capture
+
+Run all tests and seed data with:
+
+```sh
+go test ./...
+```
+
+Use the standard Go fuzz options for longer fuzz tests.
+
+Fyke does not include a packet-capture profile. Sensors do not have the `NET_RAW` capability. The `pcap_days` setting applies only to PCAP evidence from a separate, mutually authenticated sensor. Test the isolation of each packet-capture extension before deployment.
+
+The target VPS benchmark is 500 sessions and 100 events each second. The operator must run this acceptance test. It is not part of the default Docker Compose start.
 
 ## Repository map
 
 ```text
 api/fyke/v1/          protobuf transport contract
-cmd/fyke/             single binary command surface
-internal/controller/  API, SSE, alerts, metrics
-internal/cryptokit/   age identity and evidence sealing
-internal/emulator/    stateful non-executing shell
-internal/protocol/    SSH, Telnet, HTTP, HTTPS adapters
+cmd/fyke/             command-line program
+internal/controller/  API, SSE, alerts, and metrics
+internal/cryptokit/   age identity and evidence encryption
+internal/emulator/    fake shell with session state
+internal/protocol/    SSH, Telnet, HTTP, and HTTPS sensors
 internal/spool/       bounded encrypted replay queue
-internal/store/       SQLite schema, search, retention
-frontend/             React, TypeScript, Vite, Tailwind source
-internal/web/dist/    embedded production dashboard
+internal/store/       SQLite schema, search, and retention
+frontend/             React, TypeScript, Vite, and Tailwind source
+internal/web/dist/    dashboard files included in the program
 ```
 
 ## Responsible operation
 
-Run Fyke only on infrastructure you own or are authorized to monitor. The operator is responsible for privacy notices, retention policy, access controls, and local law. Fyke sends no product telemetry and performs no automatic updates or active threat-intelligence lookups.
+Run Fyke only on systems that you own or have permission to monitor. You are responsible for privacy notices, retention settings, access controls, and local law.
+
+Fyke does not send product telemetry. It does not update itself. It does not make active threat intelligence requests.

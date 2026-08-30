@@ -193,6 +193,42 @@ ADMIN_TAILNET_PORT=22222
 SSH_DROPIN=/etc/ssh/sshd_config.d/00-fyke-loopback.conf
 BACKUP_DIR=""
 
+setup_banner() {
+  _clear
+  printf '\n%s%s  Put Fyke on the public ports%s\n' "$BOLD" "$BLUE" "$RESET"
+  printf '%s  %s steps%s\n\n' "$DIM" "$TOTAL_STAGES" "$RESET"
+  say "This script moves the fake services to ports 22, 23, 80, and 443."
+  say "It keeps real SSH and the dashboard inside your tailnet."
+  warn "Keep your current SSH window open during all steps."
+  pause "Press Enter to start."
+}
+
+open_setup_url() {
+  local url="$1"
+  say "Open this address in a browser: $url"
+  { if command -v wslview >/dev/null 2>&1; then wslview "$url"
+    elif command -v explorer.exe >/dev/null 2>&1; then explorer.exe "$url"
+    elif command -v xdg-open >/dev/null 2>&1; then xdg-open "$url"
+    elif command -v open >/dev/null 2>&1; then open "$url"
+    else return 1; fi
+  } >/dev/null 2>&1 || warn "This script cannot open the browser. Open the address manually."
+}
+
+save_setting() {
+  local key="$1" value="$2" tmp
+  touch "$ENV_FILE"
+  tmp=$(mktemp)
+  grep -vE "^${key}=" "$ENV_FILE" >"$tmp" || true
+  printf '%s=%s\n' "$key" "$value" >>"$tmp"
+  mv "$tmp" "$ENV_FILE"
+  say "Saved $key in $ENV_FILE."
+}
+
+setup_finish() {
+  _clear
+  printf '\n%s%s  Setup is complete.%s\n\n' "$BOLD" "$GREEN" "$RESET"
+}
+
 as_root() {
   if (( EUID == 0 )); then
     "$@"
@@ -263,47 +299,53 @@ restore_ssh_dropin() {
   reload_ssh_listener
 }
 
-banner "Fyke live cutover"
+setup_banner
 
-stage "Preflight and deployment values"
-say "This must run on the Fyke VPS from a shell that can use sudo."
-warn "Keep this shell open until every verification stage passes. A provider console is the safest fallback."
+stage "Check this server"
+say "Run this script on the VPS that will run Fyke."
+warn "Keep this SSH window open. Open your provider console before you continue."
 for command in docker tailscale ip ss ssh curl systemctl; do
-  command -v "$command" >/dev/null 2>&1 || die "required command is missing: $command"
+  command -v "$command" >/dev/null 2>&1 || die "Install $command, and then run this script again."
 done
 if (( EUID != 0 )); then
-  command -v sudo >/dev/null 2>&1 || die "required command is missing: sudo"
+  command -v sudo >/dev/null 2>&1 || die "Install sudo, and then run this script again."
 fi
-[[ -x /usr/sbin/sshd ]] || die "OpenSSH server is not installed at /usr/sbin/sshd"
-docker info >/dev/null 2>&1 || die "Docker is unavailable to this operator"
-as_root true || die "sudo/root access is required"
-as_root tailscale status >/dev/null 2>&1 || die "Tailscale is not connected"
+[[ -x /usr/sbin/sshd ]] || die "Install the OpenSSH server, and then run this script again."
+docker info >/dev/null 2>&1 || die "Docker is not running, or your user cannot use Docker."
+as_root true || die "Run this script as root or as a user that can use sudo."
+as_root tailscale status >/dev/null 2>&1 || die "Connect this VPS to Tailscale, and then run this script again."
 if [[ -z "${SSH_CONNECTION:-}" ]]; then
-  warn "This does not appear to be an SSH session; make sure a provider console remains available."
+  warn "This does not look like an SSH session. Keep your provider console open."
 fi
-say "IPv4 addresses assigned to this VPS:"
+say "This VPS has these IPv4 addresses:"
 ip -4 -brief address show scope global | sed 's/^/    /'
-ask FYKE_BIND_IP "Public-facing host IPv4 to bind Fyke sensors to:"
-valid_ipv4 "$FYKE_BIND_IP" || die "that is not a valid IPv4 address"
-ip -4 address show | grep -Fqw "$FYKE_BIND_IP" || die "$FYKE_BIND_IP is not assigned to a host interface"
-[[ "$FYKE_BIND_IP" != 0.0.0.0 && "$FYKE_BIND_IP" != 127.0.0.1 ]] || die "choose the public-facing interface address, not wildcard or loopback"
-ask FYKE_ADMIN_USER "Real OpenSSH username (Enter uses $(id -un)):"
+ask FYKE_BIND_IP "Type the IPv4 address that receives public internet traffic:"
+valid_ipv4 "$FYKE_BIND_IP" || die "Type a valid IPv4 address."
+ip -4 address show | grep -Fqw "$FYKE_BIND_IP" || die "$FYKE_BIND_IP is not an address on this VPS. Do not use a cloud NAT address."
+[[ "$FYKE_BIND_IP" != 0.0.0.0 && "$FYKE_BIND_IP" != 127.0.0.1 ]] || die "Type the public interface address. Do not use 0.0.0.0 or 127.0.0.1."
+ask FYKE_ADMIN_USER "Type the user name for real SSH. Press Enter to use $(id -un):"
 FYKE_ADMIN_USER="${FYKE_ADMIN_USER:-$(id -un)}"
-tailnet_self=$(as_root tailscale status --self=true --peers=false --json 2>/dev/null) || die "could not read this node's Tailscale status"
+tailnet_self=$(as_root tailscale status --self=true --peers=false --json 2>/dev/null) || die "Fyke cannot read the Tailscale status for this VPS."
 FYKE_TAILNET_HOST=$(sed -n 's/.*"DNSName":[[:space:]]*"\([^"]*\)".*/\1/p' <<<"$tailnet_self" | head -n1)
 FYKE_TAILNET_HOST="${FYKE_TAILNET_HOST%.}"
-[[ -n "$FYKE_TAILNET_HOST" ]] || die "Tailscale did not report a MagicDNS hostname for this node"
-[[ "$FYKE_TAILNET_HOST" != *[[:space:]/:]* ]] || die "Tailscale returned an invalid MagicDNS hostname"
-say "Discovered Tailscale hostname: $FYKE_TAILNET_HOST"
-ask TAILSCALE_ADMIN_PRINCIPAL "Tailscale user email or group allowed to administer Fyke:"
-[[ -n "$TAILSCALE_ADMIN_PRINCIPAL" ]] || die "an administrator principal is required"
-note "No password, SSH key, or Tailscale credential is collected or written."
-pause "Values accepted. Press Enter to continue."
+[[ -n "$FYKE_TAILNET_HOST" ]] || die "Tailscale did not give this VPS a MagicDNS name. Enable MagicDNS, and then try again."
+[[ "$FYKE_TAILNET_HOST" != *[[:space:]/:]* ]] || die "Tailscale returned a MagicDNS name that Fyke cannot use."
+say "Tailscale name: $FYKE_TAILNET_HOST"
+say "Use a user email address or a group name such as group:admins."
+ask TAILSCALE_ADMIN_PRINCIPAL "Type the Tailscale user or group that can manage this VPS:"
+[[ -n "$TAILSCALE_ADMIN_PRINCIPAL" ]] || die "Type one Tailscale user or group."
+note "This script does not ask for a password, an SSH key, or a Tailscale key."
+pause "Check the values above. Press Enter to continue."
 
-stage "Back up the current access configuration"
-say "The backup contains SSH configuration, the current .env, and Tailscale Serve status."
-confirm "Create a root-only cutover backup now?" || die "stopped before making changes"
-BACKUP_DIR="/var/backups/fyke-cutover-$(date -u +%Y%m%dT%H%M%SZ)"
+stage "Save a backup"
+say "Use this backup if you must undo the changes."
+say "Fyke will save these items:"
+step "The OpenSSH settings."
+step "The Fyke .env file, if it exists."
+step "The Tailscale Serve settings."
+say "Only the root user can read the backup."
+confirm "Create the backup and continue?" || die "The script stopped. It did not change any settings."
+BACKUP_DIR="/var/backups/fyke-public-setup-$(date -u +%Y%m%dT%H%M%SZ)"
 as_root install -d -o root -g root -m 700 "$BACKUP_DIR"
 as_root cp -a /etc/ssh/sshd_config "$BACKUP_DIR/sshd_config"
 as_root cp -a /etc/ssh/sshd_config.d "$BACKUP_DIR/sshd_config.d"
@@ -321,46 +363,54 @@ services_file=$(mktemp)
 systemctl is-active ssh.service ssh.socket tailscaled.service >"$services_file" 2>&1 || true
 as_root install -o root -g root -m 600 "$services_file" "$BACKUP_DIR/services.before"
 rm -f "$services_file"
-say "Backup created: $BACKUP_DIR"
-warn "Do not delete it until the VPS has rebooted successfully and both private paths still work."
-pause "Press Enter to continue."
+say "Backup folder: $BACKUP_DIR"
+warn "Keep this backup until you restart the VPS and test real SSH and the dashboard."
+pause "The backup is complete. Press Enter to continue."
 
-stage "Restrict access in the tailnet policy"
+stage "Limit Tailscale access"
 TAILSCALE_IP=$(as_root tailscale ip -4 | head -n1)
-say "Tailscale grants are additive. A broad existing allow rule must also be narrowed if only administrators should connect."
-open_url "https://login.tailscale.com/admin/acls"
-step "Open Access controls and merge this grant into the existing policy; do not replace unrelated rules:"
+say "A grant is a Tailscale access rule."
+say "The new grant lets the selected user or group use real SSH and the dashboard."
+warn "An old rule can still give access to other users. Check all rules for this VPS."
+open_setup_url "https://login.tailscale.com/admin/acls"
+step "Open the Tailscale Access controls page."
+step "Add this grant to the current policy. Keep all unrelated rules."
 printf '\n    {\n      "src": ["%s"],\n      "dst": ["%s"],\n      "ip": ["tcp:%s", "tcp:443"]\n    }\n\n' \
   "$TAILSCALE_ADMIN_PRINCIPAL" "$TAILSCALE_IP" "$ADMIN_TAILNET_PORT"
-step "Check for broader grants or ACLs that already allow other users to this VPS on those ports. Narrow them if needed."
-step "Use the policy editor's tests/preview, then save the policy."
-confirm "Is the policy saved and does it permit your administrator identity?" || die "stopped before changing listeners"
+step "Find other rules that give access to this VPS on these ports. Remove access that is not needed."
+step "Run the policy tests."
+step "Save the policy."
+confirm "Did you save the policy, and did its tests pass?" || die "The script stopped before it created the Tailscale connections."
 
-stage "Create the private SSH and dashboard paths"
-say "Tailscale Serve will proxy private TCP $ADMIN_TAILNET_PORT to loopback OpenSSH and private HTTPS to the loopback dashboard."
-confirm "Add both Tailscale Serve endpoints?" || die "stopped before changing Tailscale Serve"
+stage "Create private access"
+say "Tailscale will send port $ADMIN_TAILNET_PORT to real OpenSSH on this VPS."
+say "Tailscale will also give the dashboard a private HTTPS address."
+confirm "Create both Tailscale connections?" || die "The script stopped. It did not change Tailscale Serve."
 as_root tailscale serve --bg --tcp="$ADMIN_TAILNET_PORT" tcp://127.0.0.1:22
 as_root tailscale serve --bg --https=443 http://127.0.0.1:9080
 as_root tailscale serve status
-curl -fsS http://127.0.0.1:9080/api/v1/health >/dev/null || die "the local Fyke dashboard health endpoint is unavailable"
-pause "Private endpoints are configured. Press Enter to verify them from another device."
+curl -fsS http://127.0.0.1:9080/api/v1/health >/dev/null || die "The Fyke dashboard does not respond on this VPS."
+pause "The private connections are ready. Press Enter to test them."
 
-stage "Verify from a second tailnet terminal"
-warn "Do not continue until the following SSH command opens a new, working real shell."
-say "From another permitted tailnet device, run:"
+stage "Test private access"
+warn "Do not continue until both tests pass."
+say "On a different device in your tailnet, run this command:"
 printf '\n    ssh -p %s %s@%s\n\n' "$ADMIN_TAILNET_PORT" "$FYKE_ADMIN_USER" "$FYKE_TAILNET_HOST"
-say "Then open this dashboard URL in a browser:"
+say "In the new SSH window, run hostname and id. These commands must show the real VPS."
+say "On the same device, open this address in a browser:"
 printf '\n    https://%s/\n\n' "$FYKE_TAILNET_HOST"
-step "In the new SSH shell, run hostname and id to prove it is real OpenSSH, not the Fyke emulator."
-step "Keep both the original shell and the new port-$ADMIN_TAILNET_PORT shell open."
-confirm "Do both private paths work from the second tailnet device?" || die "stopped; public OpenSSH remains unchanged"
+step "Keep the original SSH window open."
+step "Keep the new SSH window open."
+confirm "Can you use real SSH and open the dashboard?" || die "The script stopped. Public OpenSSH did not change."
 
-stage "Restrict real OpenSSH to loopback"
-say "This frees the public-facing address on port 22 while keeping OpenSSH reachable through Tailscale Serve."
-warn "Ubuntu may use ssh.socket; the wizard validates sshd_config and reloads the active mechanism."
-say "Existing explicit SSH listener directives, for review:"
+stage "Make real SSH private"
+say "A loopback address is available only inside this VPS."
+say "This step moves real OpenSSH to loopback port 22."
+say "Tailscale port $ADMIN_TAILNET_PORT will remain the remote connection."
+warn "The script will restore the old settings if an automatic test fails."
+say "The current OpenSSH network settings are:"
 as_root grep -RHE '^[[:space:]]*(Port|ListenAddress)[[:space:]]' /etc/ssh/sshd_config /etc/ssh/sshd_config.d 2>/dev/null | sed 's/^/    /' || true
-confirm "Restrict OpenSSH to 127.0.0.1:22 and [::1]:22 now?" || die "stopped before changing OpenSSH"
+confirm "Move real OpenSSH to the loopback addresses now?" || die "The script stopped. It did not change OpenSSH."
 ssh_dropin_tmp=$(mktemp)
 printf '%s\n' \
   '# Managed by Fyke scripts/go-live.sh.' \
@@ -371,78 +421,85 @@ as_root install -o root -g root -m 600 "$ssh_dropin_tmp" "$SSH_DROPIN"
 rm -f "$ssh_dropin_tmp"
 if ! as_root /usr/sbin/sshd -t; then
   restore_ssh_dropin
-  die "sshd rejected the loopback configuration; the previous listener was restored"
+  die "OpenSSH rejected the new settings. Fyke restored the old settings."
 fi
 if ! reload_ssh_listener; then
-  warn "OpenSSH failed to reload with the loopback listener; restoring the previous configuration."
+  warn "OpenSSH could not start with the new settings. Fyke will restore the old settings."
   restore_ssh_dropin || true
-  die "OpenSSH reload failed and the wizard attempted an immediate rollback"
+  die "Fyke tried to restore OpenSSH. Use the provider console if SSH does not work."
 fi
 if ! loopback_ssh_only; then
-  warn "Port 22 is not loopback-only; restoring the prior SSH configuration."
+  warn "Real SSH still has a non-loopback address. Fyke will restore the old settings."
   restore_ssh_dropin
-  die "OpenSSH listener validation failed; review other Port/ListenAddress directives"
+  die "Check all Port and ListenAddress lines in the OpenSSH settings."
 fi
 as_root ss -ltnp 'sport = :22' || true
-warn "Use the already-open second terminal to test port $ADMIN_TAILNET_PORT again before continuing."
-confirm "Does real SSH still work through Tailscale on port $ADMIN_TAILNET_PORT?" || {
+warn "Use the second SSH window. Test Tailscale port $ADMIN_TAILNET_PORT again."
+confirm "Does real SSH still work on Tailscale port $ADMIN_TAILNET_PORT?" || {
   restore_ssh_dropin
-  die "the prior SSH listener was restored"
+  die "Fyke restored the old OpenSSH settings."
 }
 
-stage "Retire the old Tailscale endpoints"
-say "The new private paths are verified, so the port-22 Tailscale SSH interceptor and HTTP dashboard on 9080 can be removed."
-confirm "Disable Tailscale SSH on port 22 and the old HTTP Serve endpoint on 9080?" || die "stopped; new private paths remain available"
+stage "Remove the old Tailscale access"
+say "The new Tailscale connections now work."
+say "This step turns off Tailscale SSH on port 22."
+say "It also removes the old dashboard address on port 9080."
+confirm "Remove both old Tailscale connections?" || die "The script stopped. The new private connections still work."
 as_root tailscale set --ssh=false
 if ! as_root tailscale serve --http=9080 off; then
-  warn "No matching HTTP Serve endpoint on 9080 was removed; review tailscale serve status manually."
+  warn "Fyke did not find the old dashboard connection on port 9080. Check the Tailscale Serve status."
 fi
 as_root tailscale serve status
-warn "Retest SSH port $ADMIN_TAILNET_PORT and dashboard HTTPS one more time."
-confirm "Are both replacement paths still working?" || die "stop here and use $BACKUP_DIR to restore the prior configuration"
+warn "Test real SSH and the dashboard again."
+confirm "Do real SSH and the dashboard still work?" || die "Stop now. Use the backup in $BACKUP_DIR to restore the old settings."
 
-stage "Publish Fyke on the live public ports"
-say "Only the selected public-facing IPv4 will receive the honeypot ports; Tailscale and loopback addresses remain separate."
-printf '  Bind address: %s\n  Fyke ports:   22, 23, 80, 443\n' "$FYKE_BIND_IP"
-confirm "Write the live bindings to .env and recreate the Fyke services?" || die "stopped before publishing live ports"
-write_env FYKE_BIND_IP "$FYKE_BIND_IP"
-write_env FYKE_SSH_PORT 22
-write_env FYKE_TELNET_PORT 23
-write_env FYKE_HTTP_PORT 80
-write_env FYKE_HTTPS_PORT 443
+stage "Start Fyke on the public ports"
+say "Fyke will use only the selected public IPv4 address."
+say "Fyke will not use the Tailscale or loopback addresses."
+printf '  Public IPv4 address: %s\n  Public Fyke ports:   22, 23, 80, 443\n' "$FYKE_BIND_IP"
+confirm "Save these ports and restart the Fyke services?" || die "The script stopped before it opened the public ports."
+save_setting FYKE_BIND_IP "$FYKE_BIND_IP"
+save_setting FYKE_SSH_PORT 22
+save_setting FYKE_TELNET_PORT 23
+save_setting FYKE_HTTP_PORT 80
+save_setting FYKE_HTTPS_PORT 443
 ./deploy.sh
 docker compose ps
-pause "Fyke is healthy on the live ports. Press Enter to review containment."
+pause "Fyke is running on the public ports. Press Enter to set the firewall rules."
 
-stage "Apply containment and provider firewall policy"
-say "Fyke's nftables policy blocks sensor-originated forwarding while preserving controller ingestion."
+stage "Set the firewall rules"
+say "The Fyke firewall rule blocks connections from a sensor to other networks."
+say "The rule still lets each sensor send data to the Fyke controller."
 ./deploy.sh firewall
-confirm "Apply the displayed Fyke sensor-egress policy?" || die "stopped before applying containment; the live sensors remain running"
+confirm "Install the firewall rule shown above?" || die "The script stopped. Fyke is running, but its sensor firewall rule is not installed."
 ./deploy.sh firewall apply
-ask CLOUD_FIREWALL_URL "Cloud-provider firewall page URL (optional):"
+ask CLOUD_FIREWALL_URL "Type the cloud firewall page address. Press Enter to skip this step:"
 if [[ -n "$CLOUD_FIREWALL_URL" ]]; then
-  open_url "$CLOUD_FIREWALL_URL"
+  open_setup_url "$CLOUD_FIREWALL_URL"
 fi
-step "Allow public inbound TCP 22, 23, 80, and 443 to this VPS."
-step "Do not allow public TCP 2222, 2323, 8080, 8443, 9080, or $ADMIN_TAILNET_PORT."
-step "Preserve the rules Tailscale already needs; do not disable established traffic or outbound connectivity."
-warn "The explicit IPv4 bind does not publish Fyke over IPv6. Keep unsolicited IPv6 inbound closed unless you deliberately add and test IPv6 sensor bindings."
-confirm "Is the provider firewall saved without removing your Tailscale path?" || die "review the provider firewall before closing this shell"
+step "Allow inbound TCP ports 22, 23, 80, and 443 from the public internet."
+step "Block public TCP ports 2222, 2323, 8080, 8443, 9080, and $ADMIN_TAILNET_PORT."
+step "Keep the current Tailscale rules."
+step "Keep established traffic and outbound traffic enabled."
+warn "Fyke does not listen on public IPv6. Keep public IPv6 input blocked."
+confirm "Did you save the cloud firewall rules and keep Tailscale working?" || die "Check the cloud firewall before you close this SSH window."
 
-stage "Verify the cutover and retain rollback data"
-say "From a non-tailnet external machine, verify public Fyke:"
+stage "Test the finished setup"
+say "Use a device that is not in your tailnet. Run these tests:"
 printf '\n    ssh -p 22 deploy@%s\n    curl -i http://%s/\n    curl -ki https://%s/\n\n' \
   "$FYKE_BIND_IP" "$FYKE_BIND_IP" "$FYKE_BIND_IP"
-say "From a permitted tailnet device, verify private administration:"
+say "Use an allowed device in your tailnet. Run these tests:"
 printf '\n    ssh -p %s %s@%s\n    https://%s/\n\n' \
   "$ADMIN_TAILNET_PORT" "$FYKE_ADMIN_USER" "$FYKE_TAILNET_HOST" "$FYKE_TAILNET_HOST"
-step "Confirm public TCP 9080 and $ADMIN_TAILNET_PORT fail from outside the tailnet."
-step "Confirm public port 22 shows the Fyke banner, while tailnet port $ADMIN_TAILNET_PORT runs hostname/id on the real VPS."
-step "Reboot only after all checks pass; then repeat the SSH and dashboard checks before deleting the backup."
-warn "Rollback data is in $BACKUP_DIR. Restore .env first and redeploy Fyke before restoring any public OpenSSH listener, so two services never compete for the same address and port."
-confirm "Did every public/private verification pass?" || die "keep both SSH shells open and roll back using $BACKUP_DIR"
+step "Check that public ports 9080 and $ADMIN_TAILNET_PORT do not connect."
+step "Check that public port 22 shows the Fyke SSH service."
+step "Check that Tailscale port $ADMIN_TAILNET_PORT opens the real VPS."
+warn "Do not restart the VPS until all tests pass."
+warn "If you restore the backup, restore .env and restart Fyke first. Then restore OpenSSH."
+say "Backup folder: $BACKUP_DIR"
+confirm "Did all public and private tests pass?" || die "Keep both SSH windows open. Use the backup to restore the old settings."
 
-finish
-say "Real SSH:  ssh -p $ADMIN_TAILNET_PORT $FYKE_ADMIN_USER@$FYKE_TAILNET_HOST"
-say "Dashboard: https://$FYKE_TAILNET_HOST/"
-say "Backup:    $BACKUP_DIR"
+setup_finish
+say "Real SSH command: ssh -p $ADMIN_TAILNET_PORT $FYKE_ADMIN_USER@$FYKE_TAILNET_HOST"
+say "Dashboard address: https://$FYKE_TAILNET_HOST/"
+say "Backup folder: $BACKUP_DIR"

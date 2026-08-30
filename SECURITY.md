@@ -1,14 +1,23 @@
 # Security policy
 
-Fyke handles hostile input by design. Please report a vulnerability privately to the repository owner rather than testing it against an installation you do not own.
+Fyke is designed to accept hostile input. Report a security problem privately to the repository owner.
 
-Security-sensitive invariants:
+Do not test for security problems on a Fyke server that you do not own.
 
-- No attacker-controlled input may reach `os/exec`, a shell, template execution, dynamic Go loading, or an outbound fetch.
-- Only the controller may open SQLite for writes.
-- Sensitive evidence must be age encrypted before durable controller storage.
-- Sensors must remain unprivileged, read-only, capability-free, and disconnected from the Docker socket.
-- Public artifact responses must remain attachment-only; previews must remain escaped text or hex.
-- Firewall application must remain an explicit operator action.
+The following security rules must always be true:
 
-Changes affecting these invariants should include an adversarial test and a clear threat-model note in the review.
+- Attacker input must not reach `os/exec`.
+- Attacker input must not reach a shell or a template engine.
+- Attacker input must not load Go code.
+- Attacker input must not cause an outbound network request.
+- Only the controller can write to SQLite.
+- Fyke must encrypt sensitive evidence with age before it saves the evidence.
+- Sensors must run without root privileges.
+- Sensor file systems must stay read-only.
+- Sensors must have no Linux capabilities.
+- Sensors must not connect to the Docker socket.
+- Public artifact responses must download as attachments.
+- Artifact previews must contain escaped text or hexadecimal data.
+- The operator must start each firewall change.
+
+If a change affects one of these rules, add an attack test. Also describe the related threat in the code review.

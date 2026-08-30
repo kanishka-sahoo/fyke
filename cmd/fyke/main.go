@@ -71,8 +71,8 @@ func run(args []string) error {
 	}
 }
 func usage() error {
-	fmt.Fprintln(os.Stderr, "usage: fyke <controller|sensor|init|doctor|firewall|backup|restore|export|version>")
-	return errors.New("command required")
+	fmt.Fprintln(os.Stderr, "Usage: fyke <controller|sensor|init|doctor|firewall|backup|restore|export|version>")
+	return errors.New("select a command")
 }
 func initCmd(args []string) error {
 	f := flag.NewFlagSet("init", flag.ContinueOnError)
@@ -83,7 +83,7 @@ func initCmd(args []string) error {
 	if e := ops.Init(*dir); e != nil {
 		return e
 	}
-	fmt.Printf("initialized Fyke in %s\ncontroller age identity is private; back it up securely\n", *dir)
+	fmt.Printf("Fyke is ready in %s.\nKeep the controller age identity private. Save a backup in a secure place.\n", *dir)
 	return nil
 }
 func load(args []string, name string) (config.Config, error) {
@@ -206,9 +206,9 @@ func doctorCmd(args []string) error {
 	if e = ops.Doctor(c); e != nil {
 		return e
 	}
-	fmt.Println("ok: configuration, persona, encryption identity, mTLS identities, and SSH host identity are valid")
-	fmt.Println("warning: verify Tailscale Serve or alternate-port administration before publishing ports 22/23/80/443")
-	fmt.Println("warning: containment requires `fyke firewall apply`; Compose isolation is not a host firewall")
+	fmt.Println("OK: The configuration, persona, encryption identity, mTLS identities, and SSH host identity are valid.")
+	fmt.Println("WARNING: Test private administrator access before you open public ports 22, 23, 80, and 443.")
+	fmt.Println("WARNING: Docker Compose rules are not a host firewall. Run `fyke firewall apply` to install the Fyke firewall rule.")
 	return nil
 }
 
@@ -220,7 +220,7 @@ func healthcheckCmd() error {
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return fmt.Errorf("readiness endpoint returned %s", response.Status)
+		return fmt.Errorf("Fyke is not ready. The health check returned %s", response.Status)
 	}
 	return nil
 }
@@ -230,7 +230,7 @@ func firewallCmd(args []string) error {
 		return nil
 	}
 	if len(args) == 0 || args[0] != "apply" {
-		return fmt.Errorf("usage: fyke firewall <print|apply>; changes are explicit")
+		return fmt.Errorf("usage: fyke firewall <print|apply>. Fyke changes the firewall only when you use apply")
 	}
 	c, e := load(args[1:], "firewall apply")
 	if e != nil {

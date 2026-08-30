@@ -2,7 +2,8 @@
 set -euo pipefail
 
 if [[ ! -r /etc/os-release ]]; then
-  echo "Cannot identify this operating system. Install Docker Engine and Compose v2 manually." >&2
+  echo "This script cannot identify the operating system." >&2
+  echo "Install Docker Engine and Docker Compose v2 manually." >&2
   exit 1
 fi
 
@@ -11,7 +12,8 @@ source /etc/os-release
 case "${ID:-}" in
   ubuntu|debian) DOCKER_DISTRO="$ID" ;;
   *)
-    echo "This helper supports Debian and Ubuntu. Follow https://docs.docker.com/engine/install/ for ${PRETTY_NAME:-this system}." >&2
+    echo "This script supports Debian and Ubuntu only." >&2
+    echo "For ${PRETTY_NAME:-this system}, use https://docs.docker.com/engine/install/." >&2
     exit 1
     ;;
 esac
@@ -59,8 +61,9 @@ trap 'rm -f "$TEMP_SOURCE"' EXIT
 
 "${SUDO[@]}" apt-get update
 if ! "${SUDO[@]}" apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; then
-  echo "Docker packages conflicted with an existing container runtime." >&2
-  echo "Review https://docs.docker.com/engine/install/$DOCKER_DISTRO/#uninstall-old-versions and rerun this helper." >&2
+  echo "An installed container program conflicts with the Docker packages." >&2
+  echo "Use the removal steps at https://docs.docker.com/engine/install/$DOCKER_DISTRO/#uninstall-old-versions." >&2
+  echo "Then run this script again." >&2
   exit 1
 fi
 
@@ -74,7 +77,8 @@ fi
 echo
 echo "Docker Engine and Compose v2 are installed."
 if [[ -n "$USER_TO_ADD" && "$USER_TO_ADD" != root ]]; then
-  echo "User '$USER_TO_ADD' was added to the docker group. Log out and back in, then run ./deploy.sh."
+  echo "Added user '$USER_TO_ADD' to the docker group."
+  echo "Log out and log in again. Then run ./deploy.sh."
 else
-  echo "Run ./deploy.sh as the non-root operator who will manage Fyke."
+  echo "Run ./deploy.sh as the non-root user who will manage Fyke."
 fi
