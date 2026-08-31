@@ -64,6 +64,8 @@ func run(args []string) error {
 		return exportCmd(args[1:])
 	case "healthcheck":
 		return healthcheckCmd()
+	case "public-cert":
+		return publicCertCmd(args[1:])
 	case "volume-init":
 		return ops.InitVolumes(args[1:])
 	default:
@@ -193,11 +195,36 @@ func sensorCmd(args []string) error {
 		srv := telnet.Server{ID: *id, Address: sc.Listen, Persona: p, Sink: client, Gate: gate, Limiter: limit, Idle: c.Limits.IdleTimeout, Cap: c.Limits.SessionCap, Transcript: c.Limits.TranscriptBytes}
 		return srv.Serve(ctx)
 	case "http", "https":
-		srv := httpdecoy.Server{ID: *id, Protocol: sc.Protocol, Address: sc.Listen, Persona: p, Sink: client, Limiter: limit, Idle: c.Limits.IdleTimeout, Cap: c.Limits.SessionCap, RequestBytes: c.Limits.RequestBytes, ArtifactBytes: c.Limits.ArtifactBytes, Transcript: c.Limits.TranscriptBytes, TLSCert: sc.TLS.Cert, TLSKey: sc.TLS.Key}
+		serverCert, serverKey := sc.TLS.Cert, sc.TLS.Key
+		if sc.Protocol == "https" {
+			serverCert, serverKey = ops.PublicHTTPSPaths(filepath.Dir(sc.TLS.Cert))
+		}
+		srv := httpdecoy.Server{ID: *id, Protocol: sc.Protocol, Address: sc.Listen, Persona: p, Sink: client, Limiter: limit, Idle: c.Limits.IdleTimeout, Cap: c.Limits.SessionCap, RequestBytes: c.Limits.RequestBytes, ArtifactBytes: c.Limits.ArtifactBytes, Transcript: c.Limits.TranscriptBytes, TLSCert: serverCert, TLSKey: serverKey}
 		return srv.Serve(ctx)
 	}
 	return fmt.Errorf("unsupported protocol")
 }
+
+func publicCertCmd(args []string) error {
+	c, e := load(args, "public-cert")
+	if e != nil {
+		return e
+	}
+	s, ok := c.Sensors["https"]
+	if !ok || s.Protocol != "https" {
+		return fmt.Errorf("the configuration must contain an HTTPS sensor")
+	}
+	p, e := persona.Load(c.PersonaFile)
+	if e != nil {
+		return e
+	}
+	if e = ops.EnsurePublicHTTPSCertificate(filepath.Dir(s.TLS.Cert), p.Host.Hostname); e != nil {
+		return e
+	}
+	fmt.Println("The public HTTPS certificate is ready.")
+	return nil
+}
+
 func doctorCmd(args []string) error {
 	c, e := load(args, "doctor")
 	if e != nil {

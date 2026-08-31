@@ -124,6 +124,8 @@ services:
       - ${FYKE_ROOT:-.}/pki/ca.crt:/etc/fyke/pki/ca.crt:ro
       - ${FYKE_ROOT:-.}/pki/sensor-https.crt:/etc/fyke/pki/sensor-https.crt:ro
       - ${FYKE_ROOT:-.}/pki/sensor-https.key:/etc/fyke/pki/sensor-https.key:ro
+      - ${FYKE_ROOT:-.}/pki/public-https.crt:/etc/fyke/pki/public-https.crt:ro
+      - ${FYKE_ROOT:-.}/pki/public-https.key:/etc/fyke/pki/public-https.key:ro
       - https-spool:/var/lib/fyke
     depends_on:
       controller: {condition: service_healthy}

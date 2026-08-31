@@ -43,6 +43,7 @@ func (a *API) Handler(ui http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/overview", a.overview)
 	mux.HandleFunc("GET /api/v1/events", a.events)
+	mux.HandleFunc("GET /api/v1/events/{id}", a.event)
 	mux.HandleFunc("GET /api/v1/stream", a.stream)
 	mux.HandleFunc("GET /api/v1/sessions", a.sessions)
 	mux.HandleFunc("GET /api/v1/sources", a.sources)
@@ -168,6 +169,14 @@ func (a *API) events(w http.ResponseWriter, r *http.Request) {
 	q.Until, _ = time.Parse(time.RFC3339, qv.Get("until"))
 	v, e := a.store.List(r.Context(), q)
 	respond(w, map[string]any{"items": v, "limit": limit, "offset": offset}, e)
+}
+func (a *API) event(w http.ResponseWriter, r *http.Request) {
+	v, e := a.store.Event(r.Context(), r.PathValue("id"))
+	if e != nil {
+		problem(w, http.StatusNotFound, "event not found")
+		return
+	}
+	respond(w, v, nil)
 }
 func (a *API) stream(w http.ResponseWriter, r *http.Request) {
 	f, ok := w.(http.Flusher)

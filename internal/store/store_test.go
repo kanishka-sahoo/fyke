@@ -51,6 +51,10 @@ func TestInsertDeduplicatesAndSealsEvidence(t *testing.T) {
 	if e != nil || len(listed) != 1 {
 		t.Fatalf("list=%d err=%v", len(listed), e)
 	}
+	got, e := st.Event(context.Background(), listed[0].ID)
+	if e != nil || got.ID != listed[0].ID || len(got.EvidenceRefs) != 1 {
+		t.Fatalf("event=%#v err=%v", got, e)
+	}
 }
 
 func TestSettingsRoundTrip(t *testing.T) {

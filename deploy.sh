@@ -168,6 +168,11 @@ fi
 
 docker run --rm \
   --user "$FYKE_UID:$FYKE_GID" \
+  --mount "type=bind,src=$DEPLOYMENT_DIR,dst=/deployment" \
+  fyke:local public-cert --config /deployment/config.yaml
+
+docker run --rm \
+  --user "$FYKE_UID:$FYKE_GID" \
   --mount "type=bind,src=$DEPLOYMENT_DIR,dst=/deployment,readonly" \
   fyke:local doctor --config /deployment/config.yaml
 

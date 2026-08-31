@@ -42,6 +42,9 @@ func Init(dir string) error {
 			return e
 		}
 	}
+	if e = EnsurePublicHTTPSCertificate(filepath.Join(dir, "pki"), "edge-gw-01"); e != nil {
+		return e
+	}
 	if _, e = cryptokit.GenerateIdentity(filepath.Join(dir, "controller.agekey")); e != nil {
 		return e
 	}

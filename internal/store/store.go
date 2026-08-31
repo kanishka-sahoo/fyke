@@ -250,6 +250,24 @@ func (s *Store) List(ctx context.Context, q Query) ([]EventRecord, error) {
 	}
 	return out, rows.Err()
 }
+
+// Event returns one normalized event and its encrypted evidence references.
+// Evidence bytes remain sealed until the caller explicitly requests a preview
+// or download through the artifact endpoints.
+func (s *Store) Event(ctx context.Context, id string) (EventRecord, error) {
+	var r EventRecord
+	var ts, a, p string
+	e := s.db.QueryRowContext(ctx, `SELECT id,timestamp,schema_version,sensor_id,session_id,sequence,source_ip,source_port,destination_ip,destination_port,protocol,event_type,outcome,persona,attributes_json,protocol_json FROM events WHERE id=?`, id).Scan(&r.ID, &ts, &r.Schema, &r.SensorID, &r.SessionID, &r.Sequence, &r.Source.IP, &r.Source.Port, &r.Destination.IP, &r.Destination.Port, &r.Protocol, &r.Type, &r.Outcome, &r.Persona, &a, &p)
+	if e != nil {
+		return r, e
+	}
+	r.Timestamp, _ = time.Parse(time.RFC3339Nano, ts)
+	json.Unmarshal([]byte(a), &r.Attributes)
+	json.Unmarshal([]byte(p), &r.ProtocolData)
+	r.EvidenceRefs, e = s.evidenceRefs(ctx, r.ID)
+	return r, e
+}
+
 func (s *Store) evidenceRefs(ctx context.Context, eventID string) ([]EvidenceRef, error) {
 	rows, e := s.db.QueryContext(ctx, `SELECT id,kind,content_type,filename,sha256,size FROM evidence WHERE event_id=? ORDER BY id`, eventID)
 	if e != nil {

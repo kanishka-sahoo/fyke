@@ -14,10 +14,11 @@ import (
 )
 
 func Doctor(c config.Config) error {
-	if _, e := persona.Load(c.PersonaFile); e != nil {
+	p, e := persona.Load(c.PersonaFile)
+	if e != nil {
 		return fmt.Errorf("persona: %w", e)
 	}
-	if _, e := cryptokit.Load(c.Controller.Identity); e != nil {
+	if _, e = cryptokit.Load(c.Controller.Identity); e != nil {
 		return fmt.Errorf("controller age identity: %w", e)
 	}
 	if e := privateFile(c.Controller.Identity); e != nil {
@@ -43,6 +44,14 @@ func Doctor(c config.Config) error {
 				return fmt.Errorf("SSH host key: %w", e)
 			}
 		}
+	}
+	httpsSensor, ok := c.Sensors["https"]
+	if !ok || httpsSensor.Protocol != "https" {
+		return fmt.Errorf("HTTPS sensor is required")
+	}
+	certFile, keyFile := PublicHTTPSPaths(filepath.Dir(httpsSensor.TLS.Cert))
+	if e = validatePublicHTTPSCertificate(certFile, keyFile, p.Host.Hostname); e != nil {
+		return e
 	}
 	return nil
 }

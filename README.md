@@ -145,6 +145,9 @@ The script saves backups in `/var/backups/fyke-public-setup-*`. Keep the backup 
 - Each sensor provides one protocol. A sensor cannot write to SQLite.
 - Sensors use a versioned, two-way gRPC stream. They send events and health messages on this stream.
 - TLS certificates authenticate the gRPC stream. Each sensor certificate has the DNS SAN `sensor.<id>`.
+- The public HTTPS sensor uses a separate RSA certificate. This supports older TLS clients.
+- The public HTTPS sensor does not use its private mTLS certificate for public connections.
+- `deploy.sh` creates the public HTTPS certificate if it is missing. It does not replace the private mTLS certificates.
 - Each event has a UUIDv7 ID. It also has a unique sensor, session, and sequence value.
 - Fyke can receive the same event again without creating a second copy.
 - A disconnected sensor keeps up to 512 MiB of encrypted records.
