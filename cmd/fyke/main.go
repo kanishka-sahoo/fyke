@@ -13,9 +13,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ksahoo/fyke/internal/artifactworker"
 	"github.com/ksahoo/fyke/internal/config"
 	"github.com/ksahoo/fyke/internal/controller"
 	"github.com/ksahoo/fyke/internal/cryptokit"
+	"github.com/ksahoo/fyke/internal/emulator"
 	"github.com/ksahoo/fyke/internal/model"
 	"github.com/ksahoo/fyke/internal/ops"
 	"github.com/ksahoo/fyke/internal/persona"
@@ -68,13 +70,64 @@ func run(args []string) error {
 		return publicCertCmd(args[1:])
 	case "volume-init":
 		return ops.InitVolumes(args[1:])
+	case "artifact-worker":
+		return artifactWorkerCmd(args[1:])
+	case "recipient":
+		return recipientCmd(args[1:])
+	case "persona":
+		return personaCmd(args[1:])
 	default:
 		return usage()
 	}
 }
 func usage() error {
-	fmt.Fprintln(os.Stderr, "Usage: fyke <controller|sensor|init|doctor|firewall|backup|restore|export|version>")
+	fmt.Fprintln(os.Stderr, "Usage: fyke <controller|sensor|init|doctor|firewall|backup|restore|export|persona|recipient|artifact-worker|version>")
 	return errors.New("select a command")
+}
+
+func recipientCmd(args []string) error {
+	f := flag.NewFlagSet("recipient", flag.ContinueOnError)
+	identity := f.String("identity", "controller.agekey", "age identity file")
+	if e := f.Parse(args); e != nil {
+		return e
+	}
+	sealer, e := cryptokit.Load(*identity)
+	if e != nil {
+		return e
+	}
+	fmt.Println(sealer.Recipient())
+	return nil
+}
+
+func personaCmd(args []string) error {
+	if len(args) == 0 || (args[0] != "validate" && args[0] != "preview") {
+		return fmt.Errorf("usage: fyke persona <validate|preview> --file persona.yaml")
+	}
+	f := flag.NewFlagSet("persona "+args[0], flag.ContinueOnError)
+	file := f.String("file", "personas/default.yaml", "persona YAML file")
+	user := f.String("user", "deploy", "preview shell user")
+	command := f.String("command", "", "safely emulate one command during preview")
+	if e := f.Parse(args[1:]); e != nil {
+		return e
+	}
+	p, e := persona.Load(*file)
+	if e != nil {
+		return e
+	}
+	if args[0] == "validate" {
+		fmt.Printf("OK: persona %s (version %d) is valid.\n", p.ID, p.Version)
+		return nil
+	}
+	fmt.Printf("Persona: %s (v%d)\nHost: %s — %s\nUsers: %d  Files: %d  HTTP routes: %d  Command rules: %d\n", p.ID, p.Version, p.Host.Hostname, p.Host.OS, len(p.Users), len(p.Files), len(p.HTTP.Routes), len(p.Shell.Commands))
+	if *command != "" {
+		result := emulator.NewShellWithSeed(p, *user, "preview").Run(*command)
+		fmt.Printf("\n$ %s\n%s[exit %d]", *command, result.Output, result.ExitStatus)
+		if result.Gap != "" {
+			fmt.Printf(" [emulation gap: %s]", result.Gap)
+		}
+		fmt.Println()
+	}
+	return nil
 }
 func initCmd(args []string) error {
 	f := flag.NewFlagSet("init", flag.ContinueOnError)
@@ -125,6 +178,7 @@ func controllerCmd(args []string) error {
 	}
 	alerts := controller.NewAlertEngine(ctx, st, broker, alertConfig)
 	api := controller.NewAPI(st, broker, alerts, c)
+	api.SetArtifactAnalyzer(controller.NewArtifactAnalyzer(ctx, st, c.ArtifactWorker))
 	publish := func(event model.Event) { broker.Publish(event); alerts.Process(event) }
 	errs := make(chan error, 3)
 	go func() {
@@ -136,6 +190,19 @@ func controllerCmd(args []string) error {
 	e = <-errs
 	cancel()
 	return e
+}
+
+func artifactWorkerCmd(args []string) error {
+	f := flag.NewFlagSet("artifact-worker", flag.ContinueOnError)
+	address := f.String("listen", "0.0.0.0:9091", "worker listen address")
+	maxBytes := f.Int64("max-bytes", 64<<20, "maximum artifact size")
+	token := f.String("token", os.Getenv("FYKE_ARTIFACT_WORKER_TOKEN"), "worker bearer token")
+	if e := f.Parse(args); e != nil {
+		return e
+	}
+	ctx, cancel := signalContext()
+	defer cancel()
+	return artifactworker.Serve(ctx, *address, *token, *maxBytes)
 }
 func retentionLoop(ctx context.Context, st *store.Store, c config.Config) {
 	tick := time.NewTicker(6 * time.Hour)
@@ -299,6 +366,7 @@ func exportCmd(args []string) error {
 	format := f.String("format", "jsonl", "jsonl or csv")
 	out := f.String("out", "", "output file (stdout if empty)")
 	sensitive := f.Bool("include-sensitive", false, "audit explicit sensitive export request")
+	recipient := f.String("recipient", "", "age X25519 recipient for sensitive investigation bundles")
 	if e := f.Parse(args); e != nil {
 		return e
 	}
@@ -306,5 +374,5 @@ func exportCmd(args []string) error {
 	if e != nil {
 		return e
 	}
-	return ops.Export(context.Background(), c, *format, *out, *sensitive)
+	return ops.Export(context.Background(), c, *format, *out, *sensitive, *recipient)
 }

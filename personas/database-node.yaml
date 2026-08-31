@@ -1,0 +1,39 @@
+version: 2
+id: debian-database-01
+host:
+  hostname: db-primary-01
+  os: Debian GNU/Linux 12 (bookworm)
+  kernel: 6.1.0-18-amd64
+  ssh_banner: OpenSSH_9.2p1 Debian-2+deb12u5
+  telnet_banner: Debian GNU/Linux 12 db-primary-01 ttyS0
+  booted_at: 2026-02-08T03:14:00Z
+users:
+  - {name: root, uid: 0, home: /root, shell: /bin/bash}
+  - {name: postgres, uid: 110, home: /var/lib/postgresql, shell: /bin/bash}
+honey_credentials:
+  - {username: postgres, password: postgres}
+files:
+  /etc/hostname: {mode: 420, content: "db-primary-01\n"}
+  /etc/postgresql/15/main/postgresql.conf: {mode: 420, content: "listen_addresses = '127.0.0.1'\nport = 5432\n"}
+  /var/lib/postgresql/README: {mode: 420, content: "Nightly backup staging.\n"}
+shell:
+  environment: {PGDATA: /var/lib/postgresql/15/main, PGPORT: "5432"}
+  processes:
+    - {pid: "1", user: root, command: /sbin/init}
+    - {pid: "604", user: postgres, command: "/usr/lib/postgresql/15/bin/postgres -D /var/lib/postgresql/15/main"}
+  services:
+    - {name: postgresql, state: "active (running)", description: PostgreSQL RDBMS}
+    - {name: ssh, state: "active (running)", description: OpenBSD Secure Shell server}
+  packages:
+    - {name: postgresql-15, version: "15.7-0+deb12u1"}
+    - {name: openssh-server, version: "1:9.2p1-2+deb12u5"}
+  interfaces:
+    - {name: lo, address: 127.0.0.1/8, state: up}
+    - {name: ens3, address: 10.12.4.21/24, state: up}
+  commands:
+    - {command: psql, args_contains: ["\\l"], output: "List of databases\n Name      | Owner\n-----------+----------\n app_prod  | app_user\n postgres  | postgres\n", observation: database-enumeration}
+http:
+  server: nginx/1.22.1
+  routes:
+    - {path: /, methods: [GET, HEAD], status: 200, content_type: text/plain, body: "db-primary-01 healthy\n"}
+    - {path: /health, methods: [GET], status: 200, content_type: application/json, body: '{"status":"ok","role":"primary"}'}

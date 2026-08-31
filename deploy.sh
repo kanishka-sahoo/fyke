@@ -30,6 +30,10 @@ if [[ ! -f .env ]]; then
     echo "FYKE_TELNET_PORT=2323"
     echo "FYKE_HTTP_PORT=8080"
     echo "FYKE_HTTPS_PORT=8443"
+    echo "FYKE_CAPACITY_PROFILE=standard"
+    echo "FYKE_ARTIFACT_ANALYSIS=0"
+    echo "FYKE_ARTIFACT_WORKER_URL="
+    echo "FYKE_ARTIFACT_WORKER_TOKEN=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
   } >.env
   echo "Created .env with safe test ports above 1024."
 fi
@@ -37,7 +41,7 @@ fi
 while IFS='=' read -r key value; do
   [[ -z "$key" || "$key" == \#* ]] && continue
   case "$key" in
-    FYKE_ROOT|FYKE_UID|FYKE_GID|FYKE_BIND_IP|FYKE_SSH_PORT|FYKE_TELNET_PORT|FYKE_HTTP_PORT|FYKE_HTTPS_PORT)
+    FYKE_ROOT|FYKE_UID|FYKE_GID|FYKE_BIND_IP|FYKE_SSH_PORT|FYKE_TELNET_PORT|FYKE_HTTP_PORT|FYKE_HTTPS_PORT|FYKE_CAPACITY_PROFILE|FYKE_ARTIFACT_ANALYSIS|FYKE_ARTIFACT_WORKER_URL|FYKE_ARTIFACT_WORKER_TOKEN)
       printf -v "$key" '%s' "$value"
       export "$key"
       ;;
@@ -52,6 +56,14 @@ FYKE_UID="${FYKE_UID:-$(id -u)}"
 FYKE_GID="${FYKE_GID:-$(id -g)}"
 FYKE_BIND_IP="${FYKE_BIND_IP:-0.0.0.0}"
 export FYKE_ROOT FYKE_UID FYKE_GID FYKE_BIND_IP
+
+case "${FYKE_CAPACITY_PROFILE:-standard}" in
+  small) FYKE_CONTROLLER_MEMORY=512m; FYKE_SENSOR_MEMORY=256m; FYKE_GLOBAL_SESSIONS=200; FYKE_PER_SOURCE_SESSIONS=12 ;;
+  standard) FYKE_CONTROLLER_MEMORY=768m; FYKE_SENSOR_MEMORY=384m; FYKE_GLOBAL_SESSIONS=500; FYKE_PER_SOURCE_SESSIONS=20 ;;
+  large) FYKE_CONTROLLER_MEMORY=1536m; FYKE_SENSOR_MEMORY=512m; FYKE_GLOBAL_SESSIONS=1000; FYKE_PER_SOURCE_SESSIONS=40 ;;
+  *) echo "FYKE_CAPACITY_PROFILE must be small, standard, or large." >&2; exit 1 ;;
+esac
+export FYKE_CONTROLLER_MEMORY FYKE_SENSOR_MEMORY FYKE_GLOBAL_SESSIONS FYKE_PER_SOURCE_SESSIONS
 
 if [[ ! "$FYKE_UID" =~ ^[1-9][0-9]*$ || ! "$FYKE_GID" =~ ^[1-9][0-9]*$ ]]; then
   echo "FYKE_UID and FYKE_GID must be positive numeric IDs." >&2
@@ -102,6 +114,12 @@ case "$FYKE_ROOT" in
     ;;
 esac
 
+case "${FYKE_ARTIFACT_ANALYSIS:-0}" in
+  0) ;;
+  1) COMPOSE_PROFILES="artifact-analysis"; export COMPOSE_PROFILES ;;
+  *) echo "FYKE_ARTIFACT_ANALYSIS must be 0 or 1." >&2; exit 1 ;;
+esac
+
 case "$ACTION" in
   status)
     docker compose ps
@@ -115,15 +133,39 @@ case "$ACTION" in
     docker compose down
     exit 0
     ;;
-  up|firewall) ;;
+  up|up-analysis|firewall) ;;
   *)
-    echo "Usage: ./deploy.sh [up|status|logs|stop|firewall [apply]]" >&2
+    echo "Usage: ./deploy.sh [up|up-analysis|status|logs|stop|firewall [apply]]" >&2
     exit 1
     ;;
 esac
 
+if [[ "$ACTION" == up-analysis ]]; then
+  if [[ "${FYKE_ARTIFACT_ANALYSIS:-0}" != 1 ]]; then
+    if grep -q '^FYKE_ARTIFACT_ANALYSIS=' .env; then
+      sed -i 's/^FYKE_ARTIFACT_ANALYSIS=.*/FYKE_ARTIFACT_ANALYSIS=1/' .env
+    else
+      printf '\nFYKE_ARTIFACT_ANALYSIS=1\n' >>.env
+    fi
+  fi
+  FYKE_ARTIFACT_ANALYSIS=1
+fi
+if [[ "${FYKE_ARTIFACT_ANALYSIS:-0}" == 1 ]]; then
+  if [[ -z "${FYKE_ARTIFACT_WORKER_TOKEN:-}" ]]; then
+    FYKE_ARTIFACT_WORKER_TOKEN="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
+    printf '\nFYKE_ARTIFACT_WORKER_TOKEN=%s\n' "$FYKE_ARTIFACT_WORKER_TOKEN" >>.env
+  fi
+  FYKE_ARTIFACT_WORKER_URL="http://artifact-worker:9091"
+  COMPOSE_PROFILES="artifact-analysis"
+  export FYKE_ARTIFACT_WORKER_URL FYKE_ARTIFACT_WORKER_TOKEN COMPOSE_PROFILES
+fi
+
 mkdir -p "$FYKE_ROOT"
 DEPLOYMENT_DIR="$(cd "$FYKE_ROOT" && pwd)"
+EXISTING_DEPLOYMENT=0
+if [[ -f "$DEPLOYMENT_DIR/config.yaml" ]]; then
+  EXISTING_DEPLOYMENT=1
+fi
 
 docker compose build
 
@@ -165,6 +207,7 @@ if [[ ! -f "$DEPLOYMENT_DIR/config.yaml" ]]; then
     --mount "type=bind,src=$DEPLOYMENT_DIR,dst=/deployment" \
     fyke:local init --dir /deployment
 fi
+mkdir -p "$DEPLOYMENT_DIR/backups"
 
 docker run --rm \
   --user "$FYKE_UID:$FYKE_GID" \
@@ -176,8 +219,29 @@ docker run --rm \
   --mount "type=bind,src=$DEPLOYMENT_DIR,dst=/deployment,readonly" \
   fyke:local doctor --config /deployment/config.yaml
 
+BACKUP_FILE=""
+if [[ "$EXISTING_DEPLOYMENT" == 1 ]]; then
+  BACKUP_FILE="/backups/pre-upgrade-$(date -u +%Y%m%dT%H%M%SZ).tar.age"
+  RECIPIENT="$(docker compose run --rm --no-deps controller recipient --identity /run/secrets/controller.agekey)"
+  docker compose run --rm --no-deps controller backup \
+    --config /etc/fyke/config.yaml \
+    --recipient "$RECIPIENT" \
+    --out "$BACKUP_FILE"
+  echo "Created the pre-upgrade backup at ${DEPLOYMENT_DIR}/backups/${BACKUP_FILE##*/}."
+fi
+
 docker compose config --quiet
-docker compose up -d --wait
+if [[ "${FYKE_ARTIFACT_ANALYSIS:-0}" == 0 ]]; then
+  docker compose --profile artifact-analysis rm --stop --force artifact-worker >/dev/null 2>&1 || true
+fi
+if ! docker compose up -d --wait; then
+  echo "Fyke did not become healthy after the upgrade." >&2
+  if [[ -n "$BACKUP_FILE" ]]; then
+    echo "The encrypted pre-upgrade backup is ${DEPLOYMENT_DIR}/backups/${BACKUP_FILE##*/}." >&2
+    echo "Stop Fyke and follow the restore procedure in README.md before retrying." >&2
+  fi
+  exit 1
+fi
 
 echo
 echo "Fyke is running:"

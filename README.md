@@ -72,12 +72,15 @@ Use these commands to operate Fyke:
 ./deploy.sh status             # Show the containers.
 ./deploy.sh logs               # Show new log entries.
 ./deploy.sh stop               # Stop Fyke.
+./deploy.sh up-analysis        # Enable the optional offline artifact worker.
 ./deploy.sh firewall           # Show the proposed firewall rule.
 ./deploy.sh firewall apply     # Install the firewall rule.
 ./scripts/go-live.sh           # Move Fyke to the public ports.
 ```
 
-The `.env` file contains the sensor address, ports, user ID, group ID, and deployment directory. See `.env.example` for all settings.
+The `.env` file contains the sensor address, ports, user ID, group ID, deployment directory, and capacity profile. `FYKE_CAPACITY_PROFILE` may be `small` (about 2 GiB VPS), `standard` (recommended, about 4 GiB), or `large` (about 8 GiB). See `.env.example` for all settings.
+
+`./deploy.sh up-analysis` records `FYKE_ARTIFACT_ANALYSIS=1` so later upgrades keep the isolated worker enabled. Set it back to `0` and run `./deploy.sh` to disable the profile.
 
 Do not set `FYKE_SSH_PORT=22` until you test private access to real SSH. `deploy.sh` blocks `0.0.0.0:22` and `127.0.0.1:22`. For public port 22, set `FYKE_BIND_IP` to the public-facing IPv4 address on the VPS.
 
@@ -89,6 +92,8 @@ To update Fyke, run:
 git pull --ff-only
 ./deploy.sh
 ```
+
+For an existing deployment, the update workflow validates the configuration, creates an age-encrypted point-in-time backup in `deployment/backups`, starts the new containers, and waits for health checks. It never updates automatically. If health verification fails, it stops and prints the backup location and restore guidance.
 
 Save a separate copy of `deployment/controller.agekey`. Keep this copy in a secure place. You need this key to decrypt the collected evidence. Fyke never copies this key into a sensor container.
 
@@ -154,13 +159,14 @@ The script saves backups in `/var/backups/fyke-public-setup-*`. Keep the backup 
 - If the sensor queue is full, the protocol waits. Fyke does not delete evidence that the controller has not received.
 - The controller keeps routing and investigation data searchable.
 - The controller encrypts credentials, command arguments, bodies, transcripts, and uploads with its X25519 age identity.
-- The fake shell uses a fixed command list, a read-only persona, and temporary session memory.
+- Persona v2 uses a bounded shell grammar, a read-only persona, and temporary per-session state shared across SSH channels.
 - The fake shell has no adapter that can run a command.
 - SFTP writes go to an encrypted quarantine with a size limit.
 - Fyke records and rejects SCP execution.
-- Fyke records URLs but never fetches them.
+- Fyke records URLs and can return declared fake network results, but never fetches them.
 - Artifact previews contain escaped text or hexadecimal data.
 - Artifact downloads use `application/octet-stream` and `Content-Disposition: attachment`.
+- Optional artifact inspection runs in a separate internal-only container with no capabilities, Fyke identity, database mount, or outbound network. It hashes and inspects bounded archive metadata; it never executes or extracts the Artifact.
 - The dashboard listens on the local host only.
 - Fyke rejects proxy identity headers from an untrusted peer.
 - Fyke trusts the verified local Docker host gateway when it acts as the proxy.
@@ -239,12 +245,16 @@ The rule permits established traffic. It does not change the private controller 
 | `fyke export` | Export normalized JSONL or CSV. |
 | `fyke backup` | Create a consistent database and artifact tar stream. Encrypt it for a recovery recipient. |
 | `fyke restore` | Check and restore a backup into an empty directory. |
+| `fyke persona validate` | Strictly validate a local Persona v1 or v2 pack. |
+| `fyke persona preview` | Show Persona facts and safely emulate one optional command. |
+| `fyke recipient` | Print the public age recipient for an identity. |
+| `fyke artifact-worker` | Run the optional bounded static-inspection worker. |
 
-`fyke export --include-sensitive` includes sensitive evidence. You must select this option. Fyke records the action in the audit log.
+Ordinary exports contain every matching Event present when the export begins; there is no hidden 1,000-row limit. `fyke export --include-sensitive` requires both an explicit age recipient and output file, creates an encrypted Investigation Bundle, and records the action in the audit log.
 
 ## Back up and restore data
 
-Stop the controller before a backup. This stops changes to the database and artifacts during the backup.
+Backups use SQLite's point-in-time `VACUUM INTO` operation and do not run database migrations. Stopping the controller gives the strongest artifact-set boundary but is not required for the database snapshot. `deploy.sh` creates an automatic encrypted backup before every upgrade of an existing deployment.
 
 ```sh
 FYKE_ROOT=./deployment docker compose stop controller
@@ -266,26 +276,34 @@ During a restore, Fyke rejects unsafe archive paths. It also checks each file ha
 
 The controller provides `/api/v1` on the local address. The main resources are:
 
-- `GET /overview`, `/events`, `/sessions`, `/sources`, `/artifacts`, and `/alerts`
+- `GET /overview`, `/events`, `/sessions`, `/sources`, `/artifacts`, `/findings`, and `/alerts`
 - `GET /stream` for the live server-sent event stream
-- `GET /artifacts/{id}/preview` and `/download`
+- `GET /artifacts/{id}/preview`, `/download`, and `/analysis`; `POST /analysis` queues isolated inspection
+- `GET /observables?kind=...&value=...` for exact investigation pivots
+- `GET|PUT /sources/{ip}/context` and `POST /source-context/import` for local labels and offline enrichment
+- `GET /alert-deliveries` and `POST /alert-deliveries/{id}/retry`
+- `POST /investigation-bundles` for explicit encrypted Evidence handoff
 - `GET /exports?format=jsonl|csv&sensitive=false`
-- `GET /health`, `/retention`, and `/preferences/alerts`
+- `GET /health`, `/retention`, `/storage`, `/audit`, and `/preferences/alerts`
 - `POST /retention/run` and `PUT /preferences/alerts`
 
 The private metrics service provides `/metrics`, `/livez`, and `/readyz`. It listens on the configured local address. Docker Compose waits for `/readyz` before it starts the sensors.
 
-Fyke can alert on these events:
+Fyke persists explainable, versioned Findings for these behaviors:
 
 - A successful fake login
 - An artifact upload
 - A new public-key fingerprint
 - A source traffic spike
 - An unhealthy sensor
+- Post-login commands and staged downloads
+- Cross-protocol activity and probable HTTP enumeration
+- Reused submitted secrets, correlated with a controller-keyed token
+- Recurring Persona emulation gaps
 
-Fyke saves sensor health changes and alert preferences. These values remain after a restart.
+Finding status, sensor health, alert preferences, and delivery attempts remain after a restart. Rules have configurable enablement, severity, and cooldown values.
 
-The HTTPS webhook queue has a fixed size. Failed requests use bounded exponential retries. Each request has a stable event ID for idempotency.
+The webhook outbox is durable and at-least-once. Failed requests use bounded exponential retries, remain visible, and support manual retry. Each request includes `Idempotency-Key`, `X-Fyke-Timestamp`, and an HMAC-SHA256 `X-Fyke-Signature`.
 
 SQLite uses WAL and full synchronous durability. Fyke uses transactions for migrations. It also uses normalized indexes, FTS5 metadata search, one serialized writer, and integrity checks.
 
@@ -296,7 +314,6 @@ The default retention periods are:
 | Metadata | 180 days |
 | Transcripts | 90 days |
 | Payloads | 30 days |
-| Submitted PCAP evidence | 14 days |
 
 The default storage limit is 20 GiB. Fyke measures the complete controller data directory. It removes encrypted evidence in priority order before it removes old event metadata. Fyke compacts SQLite when it must remove metadata.
 
@@ -304,7 +321,16 @@ The default storage limit is 20 GiB. Fyke measures the complete controller data 
 
 A persona pack is a versioned YAML file. It is not an executable plugin.
 
-A persona defines the fake host, users, read-only file system, honey credentials, HTTP routes, and protocol banners. Fyke rejects path traversal, executable file entries, unknown HTTP methods, and unsupported persona versions.
+A Persona defines the fake host, users, read-only file system, honey credentials, HTTP routes, and protocol banners. Persona v2 also declares typed command behavior, processes, services, packages, interfaces, fake network outcomes, and bounded HTTP conversation state. Fyke rejects path traversal, executable file entries, unknown HTTP methods, unsafe delays, and unsupported versions. It does not offer general templates, regular-expression routes, or executable plugins.
+
+The bundled packs are `default.yaml`, `database-node.yaml`, and `router-appliance.yaml`. Validate or preview a local pack before deployment:
+
+```sh
+fyke persona validate --file personas/database-node.yaml
+fyke persona preview --file personas/database-node.yaml --user postgres --command 'ps'
+```
+
+The shell supports quoting, environment variables, globs, sequencing, conditionals, pipelines, and virtual redirection. Command substitution, jobs, loops, functions, subshells, interpreters, and host execution remain outside the grammar. Unsupported behavior is recorded as an Emulation Gap.
 
 Honey credentials open a fake session immediately. Other credentials fail two times. The third failed attempt opens a fake session. The three attempts must use one source and one protocol within ten minutes.
 
@@ -316,7 +342,7 @@ Automated tests cover these functions:
 - Strict configuration parsing
 - Generated deployment identities
 - Persona path safety
-- Shell syntax rejection
+- Bounded shell grammar, virtual state, and syntax rejection
 - URL non-fetch behavior
 - Authentication time windows
 - Session limits
@@ -330,6 +356,11 @@ Automated tests cover these functions:
 - The complete storage limit
 - Telnet negotiation
 - Bounded HTTP raw capture
+- HTTP route conversation state and context escaping
+- Complete exports beyond 1,000 Events
+- Signed durable webhook delivery
+- SSH session state, SFTP reads, and SCP rejection
+- Bounded archive inspection
 
 Run all tests and seed data with:
 
@@ -339,9 +370,9 @@ go test ./...
 
 Use the standard Go fuzz options for longer fuzz tests.
 
-Fyke does not include a packet-capture profile. Sensors do not have the `NET_RAW` capability. The `pcap_days` setting applies only to PCAP evidence from a separate, mutually authenticated sensor. Test the isolation of each packet-capture extension before deployment.
+Fyke does not capture packets in the beta. There is no packet-capture profile, the Sensors do not have `NET_RAW`, and PCAP is not a normal configuration or dashboard feature. A separately engineered capture extension would need its own isolation and acceptance testing.
 
-The target VPS benchmark is 500 sessions and 100 events each second. The operator must run this acceptance test. It is not part of the default Docker Compose start.
+Run `scripts/load-check.sh` against a loopback HTTP Sensor before public exposure or after changing capacity profiles. It is bounded to 10,000 requests and refuses non-loopback targets unless the Operator explicitly confirms ownership with `FYKE_ALLOW_REMOTE_LOAD=1`.
 
 ## Repository map
 
@@ -351,11 +382,14 @@ cmd/fyke/             command-line program
 internal/controller/  API, SSE, alerts, and metrics
 internal/cryptokit/   age identity and evidence encryption
 internal/emulator/    fake shell with session state
+internal/artifactworker/ optional bounded static artifact inspection
 internal/protocol/    SSH, Telnet, HTTP, and HTTPS sensors
 internal/spool/       bounded encrypted replay queue
 internal/store/       SQLite schema, search, and retention
 frontend/             React, TypeScript, Vite, and Tailwind source
 internal/web/dist/    dashboard files included in the program
+personas/             validated bundled Persona v2 packs
+docs/adr/             accepted architecture decisions
 ```
 
 ## Responsible operation

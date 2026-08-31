@@ -7,11 +7,13 @@ x-sensor: &sensor
   cap_drop: [ALL]
   security_opt: [no-new-privileges:true]
   pids_limit: 256
-  mem_limit: 384m
+  mem_limit: "${FYKE_SENSOR_MEMORY:-384m}"
   tmpfs: ["/tmp:size=32m,noexec,nosuid,nodev"]
   environment:
     FYKE_CONTAINER: "1"
     FYKE_DATA_DIR: /var/lib/fyke
+    FYKE_GLOBAL_SESSIONS: "${FYKE_GLOBAL_SESSIONS:-500}"
+    FYKE_PER_SOURCE_SESSIONS: "${FYKE_PER_SOURCE_SESSIONS:-20}"
   networks: [sensors, control]
 
 services:
@@ -45,12 +47,14 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     pids_limit: 512
-    mem_limit: 768m
+    mem_limit: "${FYKE_CONTROLLER_MEMORY:-768m}"
     environment:
       FYKE_CONTAINER: "1"
       FYKE_DATA_DIR: /var/lib/fyke
       FYKE_CONTROLLER_IDENTITY: /run/secrets/controller.agekey
       FYKE_CONTROLLER_HTTP: 0.0.0.0:9080
+      FYKE_ARTIFACT_WORKER_URL: "${FYKE_ARTIFACT_WORKER_URL:-}"
+      FYKE_ARTIFACT_WORKER_TOKEN: "${FYKE_ARTIFACT_WORKER_TOKEN:-}"
     volumes:
       - ${FYKE_ROOT:-.}/config.yaml:/etc/fyke/config.yaml:ro
       - ${FYKE_ROOT:-.}/personas/default.yaml:/etc/fyke/personas/default.yaml:ro
@@ -58,10 +62,11 @@ services:
       - ${FYKE_ROOT:-.}/pki/controller.crt:/etc/fyke/pki/controller.crt:ro
       - ${FYKE_ROOT:-.}/pki/controller.key:/etc/fyke/pki/controller.key:ro
       - ${FYKE_ROOT:-.}/controller.agekey:/run/secrets/controller.agekey:ro
+      - ${FYKE_ROOT:-.}/backups:/backups
       - controller-data:/var/lib/fyke
     tmpfs: ["/tmp:size=64m,noexec,nosuid,nodev"]
     ports: ["127.0.0.1:9080:9080"]
-    networks: [control, outbound]
+    networks: [control, outbound, analysis]
     healthcheck:
       test: [CMD, /usr/local/bin/fyke, healthcheck]
       interval: 10s
@@ -70,6 +75,23 @@ services:
       start_period: 10s
     depends_on:
       init-permissions: {condition: service_completed_successfully}
+
+  artifact-worker:
+    image: fyke:local
+    build: .
+    profiles: [artifact-analysis]
+    command: [artifact-worker, --listen, "0.0.0.0:9091", --max-bytes, "67108864"]
+    restart: unless-stopped
+    read_only: true
+    user: "${FYKE_UID:-1000}:${FYKE_GID:-1000}"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 192m
+    networks: [analysis]
+    environment:
+      FYKE_ARTIFACT_WORKER_TOKEN: "${FYKE_ARTIFACT_WORKER_TOKEN:-}"
+    tmpfs: ["/tmp:size=16m,noexec,nosuid,nodev"]
 
   sensor-ssh:
     <<: *sensor
@@ -133,6 +155,7 @@ services:
 
 networks:
   sensors:
+    internal: true
     driver: bridge
     driver_opts: {com.docker.network.bridge.name: fyke-sensors}
   control:
@@ -140,5 +163,8 @@ networks:
     driver: bridge
     driver_opts: {com.docker.network.bridge.name: fyke-control}
   outbound:
+    driver: bridge
+  analysis:
+    internal: true
     driver: bridge
 volumes: {controller-data: {}, ssh-spool: {}, telnet-spool: {}, http-spool: {}, https-spool: {}}

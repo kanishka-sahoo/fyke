@@ -15,14 +15,15 @@ import (
 )
 
 type Config struct {
-	DataDir     string            `yaml:"data_dir"`
-	PersonaFile string            `yaml:"persona_file"`
-	Controller  Controller        `yaml:"controller"`
-	Sensors     map[string]Sensor `yaml:"sensors"`
-	Limits      Limits            `yaml:"limits"`
-	Retention   Retention         `yaml:"retention"`
-	Access      Access            `yaml:"access"`
-	Alerts      Alerts            `yaml:"alerts"`
+	DataDir        string            `yaml:"data_dir"`
+	PersonaFile    string            `yaml:"persona_file"`
+	Controller     Controller        `yaml:"controller"`
+	Sensors        map[string]Sensor `yaml:"sensors"`
+	Limits         Limits            `yaml:"limits"`
+	Retention      Retention         `yaml:"retention"`
+	Access         Access            `yaml:"access"`
+	Alerts         Alerts            `yaml:"alerts"`
+	ArtifactWorker ArtifactWorker    `yaml:"artifact_worker,omitempty"`
 }
 type Controller struct {
 	GRPC     string `yaml:"grpc"`
@@ -55,7 +56,7 @@ type Limits struct {
 type Retention struct {
 	MetadataDays   int   `yaml:"metadata_days" json:"metadata_days"`
 	TranscriptDays int   `yaml:"transcript_days" json:"transcript_days"`
-	PCAPDays       int   `yaml:"pcap_days" json:"pcap_days"`
+	PCAPDays       int   `yaml:"pcap_days,omitempty" json:"-"`
 	PayloadDays    int   `yaml:"payload_days" json:"payload_days"`
 	TotalBytes     int64 `yaml:"total_bytes" json:"total_bytes"`
 }
@@ -64,8 +65,19 @@ type Access struct {
 	TrustedProxies []string `yaml:"trusted_proxies"`
 }
 type Alerts struct {
-	Webhooks             []string `yaml:"webhooks" json:"webhooks"`
-	SourceSpikePerMinute int      `yaml:"source_spike_per_minute" json:"source_spike_per_minute"`
+	Webhooks             []string             `yaml:"webhooks" json:"webhooks"`
+	SourceSpikePerMinute int                  `yaml:"source_spike_per_minute" json:"source_spike_per_minute"`
+	WebhookSigningSecret string               `yaml:"webhook_signing_secret,omitempty" json:"webhook_signing_secret,omitempty"`
+	Rules                map[string]AlertRule `yaml:"rules,omitempty" json:"rules,omitempty"`
+}
+type AlertRule struct {
+	Enabled         bool   `yaml:"enabled" json:"enabled"`
+	Severity        string `yaml:"severity,omitempty" json:"severity,omitempty"`
+	CooldownMinutes int    `yaml:"cooldown_minutes,omitempty" json:"cooldown_minutes,omitempty"`
+}
+type ArtifactWorker struct {
+	URL   string `yaml:"url" json:"url,omitempty"`
+	Token string `yaml:"token" json:"-"`
 }
 
 func Defaults() Config {
@@ -123,6 +135,26 @@ func Load(path string) (Config, error) {
 	if v := os.Getenv("FYKE_CONTROLLER_HTTP"); v != "" {
 		c.Controller.HTTP = v
 	}
+	if v := os.Getenv("FYKE_ARTIFACT_WORKER_URL"); v != "" {
+		c.ArtifactWorker.URL = v
+	}
+	if v := os.Getenv("FYKE_ARTIFACT_WORKER_TOKEN"); v != "" {
+		c.ArtifactWorker.Token = v
+	}
+	if v := os.Getenv("FYKE_GLOBAL_SESSIONS"); v != "" {
+		n, parseErr := strconv.Atoi(v)
+		if parseErr != nil {
+			return c, fmt.Errorf("FYKE_GLOBAL_SESSIONS must be numeric")
+		}
+		c.Limits.GlobalSessions = n
+	}
+	if v := os.Getenv("FYKE_PER_SOURCE_SESSIONS"); v != "" {
+		n, parseErr := strconv.Atoi(v)
+		if parseErr != nil {
+			return c, fmt.Errorf("FYKE_PER_SOURCE_SESSIONS must be numeric")
+		}
+		c.Limits.PerSourceSessions = n
+	}
 	return c, c.Validate()
 }
 func (c Config) Validate() error {
@@ -174,6 +206,15 @@ func (c Config) Validate() error {
 			return fmt.Errorf("sensor %q has unsupported protocol %q", id, s.Protocol)
 		}
 	}
+	if c.ArtifactWorker.URL != "" {
+		u, parseErr := url.Parse(c.ArtifactWorker.URL)
+		if parseErr != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return fmt.Errorf("artifact_worker.url must be an absolute HTTP or HTTPS URL")
+		}
+		if len(c.ArtifactWorker.Token) < 32 {
+			return fmt.Errorf("artifact_worker.token must contain at least 32 characters")
+		}
+	}
 	return c.Alerts.Validate()
 }
 
@@ -197,6 +238,19 @@ func (a Alerts) Validate() error {
 		u, err := url.Parse(raw)
 		if err != nil || u.Scheme != "https" || u.Host == "" {
 			return fmt.Errorf("alert webhook must use an absolute https URL")
+		}
+	}
+	if a.WebhookSigningSecret != "" && len(a.WebhookSigningSecret) < 32 {
+		return fmt.Errorf("webhook_signing_secret must contain at least 32 characters")
+	}
+	for name, rule := range a.Rules {
+		if name == "" || rule.CooldownMinutes < 0 {
+			return fmt.Errorf("invalid alert rule %q", name)
+		}
+		switch rule.Severity {
+		case "", "low", "medium", "high", "critical":
+		default:
+			return fmt.Errorf("alert rule %q has invalid severity", name)
 		}
 	}
 	return nil

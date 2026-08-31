@@ -72,7 +72,7 @@ func hostKey(file string) error {
 	return os.WriteFile(file, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0600)
 }
 
-const defaultPersona = `version: 1
+const defaultPersona = `version: 2
 id: debian-edge-01
 host:
   hostname: edge-gw-01
@@ -91,11 +91,32 @@ files:
   /etc/os-release: {mode: 420, content: "PRETTY_NAME=\"Debian GNU/Linux 12 (bookworm)\"\n"}
   /etc/passwd: {mode: 420, content: "root:x:0:0:root:/root:/bin/bash\ndeploy:x:1001:1001:Deploy:/home/deploy:/bin/bash\n"}
   /home/deploy/README.txt: {mode: 420, content: "Edge deployment staging host.\n"}
+shell:
+  environment: {APP_ENV: production, REGION: eu-west}
+  processes:
+    - {pid: "1", user: root, command: /sbin/init}
+    - {pid: "412", user: root, command: "sshd: /usr/sbin/sshd -D"}
+    - {pid: "876", user: www-data, command: "nginx: worker process"}
+  services:
+    - {name: ssh, state: "active (running)", description: OpenBSD Secure Shell server}
+    - {name: nginx, state: "active (running)", description: A high performance web server}
+  packages:
+    - {name: openssh-server, version: "1:9.2p1-2+deb12u5"}
+    - {name: nginx, version: "1.22.1-9"}
+  interfaces:
+    - {name: lo, address: 127.0.0.1/8, state: up}
+    - {name: eth0, address: 10.0.0.12/24, state: up}
+  commands:
+    - {command: docker, args_prefix: [ps], output: "CONTAINER ID   IMAGE          STATUS       NAMES\n9c03a91e4f10   edge-api:1.8   Up 11 days   edge-api\n", observation: container-discovery}
+  network:
+    - {url_prefix: "https://updates.example.invalid/", outcome: success, body: "release=1.8.4\n", filename: release.txt}
 http:
   server: nginx/1.22.1
   routes:
     - {path: /, methods: [GET, HEAD], status: 200, content_type: "text/html; charset=utf-8", body: "<!doctype html><title>Edge Gateway</title><h1>Gateway Console</h1>"}
-    - {path: /login, methods: [GET, POST], status: 200, content_type: "text/html; charset=utf-8", body: "<!doctype html><title>Sign in</title><form method=post><input name=username><input name=password type=password></form>"}
+    - {path: /login, methods: [GET], status: 200, content_type: "text/html; charset=utf-8", body: "<!doctype html><title>Sign in</title><form method=post><input name=username><input name=password type=password></form>"}
+    - {path: /login, methods: [POST], status: 200, content_type: "text/html; charset=utf-8", body: "Signed in as {{form.username}}", set_state: {authenticated: "true", username: "{{form.username}}"}, delay_ms: 180}
+    - {path_pattern: "/admin/{section}", methods: [GET], status: 200, content_type: "text/html; charset=utf-8", body: "<!doctype html><title>Gateway {{path.section}}</title><h1>{{path.section}}</h1><p>Host {{persona.host.hostname}}</p>", require_state: {authenticated: "true"}}
     - {path: /api/upload, methods: [POST, PUT], status: 201, content_type: application/json, body: "{\"status\":\"queued\"}", upload: true}
 `
 const defaultConfig = `data_dir: ./data
@@ -112,7 +133,7 @@ sensors:
   http: {protocol: http, listen: "0.0.0.0:8080", controller: "controller:9443", tls: {cert: ./pki/sensor-http.crt, key: ./pki/sensor-http.key, ca: ./pki/ca.crt}}
   https: {protocol: https, listen: "0.0.0.0:8443", controller: "controller:9443", tls: {cert: ./pki/sensor-https.crt, key: ./pki/sensor-https.key, ca: ./pki/ca.crt}}
 limits: {idle_timeout: 10m, session_cap: 2h, transcript_bytes: 5242880, request_bytes: 10485760, artifact_bytes: 52428800, global_sessions: 500, per_source_sessions: 20, spool_bytes: 536870912}
-retention: {metadata_days: 180, transcript_days: 90, pcap_days: 14, payload_days: 30, total_bytes: 21474836480}
+retention: {metadata_days: 180, transcript_days: 90, payload_days: 30, total_bytes: 21474836480}
 access: {bearer_token: "", trusted_proxies: [127.0.0.1, "::1"]}
 alerts: {webhooks: [], source_spike_per_minute: 60}
 `

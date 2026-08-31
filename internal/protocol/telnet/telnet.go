@@ -90,7 +90,7 @@ func (s *Server) handle(ctx context.Context, c net.Conn) {
 		return
 	}
 	io.WriteString(c, "\r\nLast login: "+time.Now().Add(-19*time.Hour).Format(time.ANSIC)+" from 10.0.0.12\r\n")
-	sh := emulator.NewShell(s.Persona, user)
+	sh := emulator.NewShellWithSeed(s.Persona, user, sess.ID)
 	for {
 		io.WriteString(c, sh.Prompt())
 		line, e := r.line(16 << 10)
@@ -98,9 +98,27 @@ func (s *Server) handle(ctx context.Context, c net.Conn) {
 			return
 		}
 		res := sh.Run(line)
+		if res.Delay > 0 {
+			timer := time.NewTimer(res.Delay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+		}
 		ev := []model.Evidence{{Kind: "command.arguments", ContentType: "text/plain", Data: []byte(res.Arguments)}}
-		if e = sess.Emit(ctx, "command", "success", map[string]any{"command": res.Command, "unsupported_syntax": res.Unsupported, "urls": res.URLs}, nil, ev...); e != nil {
+		commandOutcome := "success"
+		if res.ExitStatus != 0 {
+			commandOutcome = "failure"
+		}
+		if e = sess.Emit(ctx, "command", commandOutcome, map[string]any{"command": res.Command, "exit_status": res.ExitStatus, "unsupported_syntax": res.Unsupported, "emulation_gap": res.Gap, "observation": res.Observation, "urls": res.URLs}, nil, ev...); e != nil {
 			return
+		}
+		if res.Gap != "" {
+			if e = sess.Emit(ctx, "emulation.gap", "observed", map[string]any{"command": res.Command, "gap": res.Gap}, nil); e != nil {
+				return
+			}
 		}
 		if b := sess.Transcript([]byte(line + "\n" + res.Output)); len(b) > 0 {
 			if e = sess.Emit(ctx, "transcript.chunk", "success", nil, nil, model.Evidence{Kind: "transcript", ContentType: "text/plain", Data: b}); e != nil {

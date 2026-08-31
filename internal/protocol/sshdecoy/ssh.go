@@ -119,6 +119,7 @@ func (s *Server) handle(parent context.Context, c net.Conn, signer ssh.Signer) {
 	}
 	defer sess.Emit(context.Background(), "session.end", "success", nil, nil)
 	go ssh.DiscardRequests(requests)
+	sh := emulator.NewShellWithSeed(s.Persona, conn.User(), sess.ID)
 	for ch := range chans {
 		if ch.ChannelType() != "session" {
 			ch.Reject(ssh.UnknownChannelType, "unsupported channel")
@@ -128,10 +129,10 @@ func (s *Server) handle(parent context.Context, c net.Conn, signer ssh.Signer) {
 		if e != nil {
 			continue
 		}
-		go s.session(ctx, sess, conn.User(), channel, reqs)
+		go s.session(ctx, sess, sh, channel, reqs)
 	}
 }
-func (s *Server) session(ctx context.Context, sess *sensor.Session, user string, ch ssh.Channel, reqs <-chan *ssh.Request) {
+func (s *Server) session(ctx context.Context, sess *sensor.Session, sh *emulator.Shell, ch ssh.Channel, reqs <-chan *ssh.Request) {
 	defer ch.Close()
 	for req := range reqs {
 		switch req.Type {
@@ -139,7 +140,7 @@ func (s *Server) session(ctx context.Context, sess *sensor.Session, user string,
 			req.Reply(true, nil)
 		case "shell":
 			req.Reply(true, nil)
-			s.interactive(ctx, sess, user, ch)
+			s.interactive(ctx, sess, sh, ch)
 			return
 		case "exec":
 			var v struct{ Command string }
@@ -156,13 +157,15 @@ func (s *Server) session(ctx context.Context, sess *sensor.Session, user string,
 				return
 			}
 			req.Reply(true, nil)
-			sh := emulator.NewShell(s.Persona, user)
 			res := sh.Run(v.Command)
+			if !waitResult(ctx, res.Delay) {
+				return
+			}
 			if e := s.recordCommand(ctx, sess, v.Command, res); e != nil {
 				return
 			}
 			io.WriteString(ch, strings.ReplaceAll(res.Output, "\r\n", "\n"))
-			ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{0}))
+			ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{uint32(res.ExitStatus)}))
 			return
 		case "subsystem":
 			var v struct{ Name string }
@@ -179,12 +182,20 @@ func (s *Server) session(ctx context.Context, sess *sensor.Session, user string,
 		}
 	}
 }
-func (s *Server) interactive(ctx context.Context, sess *sensor.Session, user string, ch ssh.Channel) {
-	sh := emulator.NewShell(s.Persona, user)
+func (s *Server) interactive(ctx context.Context, sess *sensor.Session, sh *emulator.Shell, ch ssh.Channel) {
 	io.WriteString(ch, "Linux "+s.Persona.Host.Hostname+" "+s.Persona.Host.Kernel+" x86_64\r\n\r\n")
 	buf := make([]byte, 1)
-	var line bytes.Buffer
+	line := []byte{}
+	cursor := 0
+	history := []string{}
+	historyAt := 0
 	io.WriteString(ch, sh.Prompt())
+	redraw := func() {
+		io.WriteString(ch, "\r\x1b[2K"+sh.Prompt()+string(line))
+		if back := len(line) - cursor; back > 0 {
+			io.WriteString(ch, fmt.Sprintf("\x1b[%dD", back))
+		}
+	}
 	for {
 		if _, e := ch.Read(buf); e != nil {
 			return
@@ -192,9 +203,20 @@ func (s *Server) interactive(ctx context.Context, sess *sensor.Session, user str
 		switch buf[0] {
 		case '\r', '\n':
 			io.WriteString(ch, "\r\n")
-			input := line.String()
-			line.Reset()
+			input := string(line)
+			if strings.TrimSpace(input) != "" {
+				history = append(history, input)
+				if len(history) > 100 {
+					history = history[len(history)-100:]
+				}
+			}
+			historyAt = len(history)
+			line = nil
+			cursor = 0
 			res := sh.Run(input)
+			if !waitResult(ctx, res.Delay) {
+				return
+			}
 			if e := s.recordCommand(ctx, sess, input, res); e != nil {
 				return
 			}
@@ -203,26 +225,107 @@ func (s *Server) interactive(ctx context.Context, sess *sensor.Session, user str
 				return
 			}
 			io.WriteString(ch, sh.Prompt())
-		case 3:
-			return
+		case 3: // Ctrl-C: cancel the current line, keep the session.
+			line = nil
+			cursor = 0
+			io.WriteString(ch, "^C\r\n"+sh.Prompt())
+		case 4: // Ctrl-D
+			if len(line) == 0 {
+				return
+			}
+		case 21: // Ctrl-U
+			line = nil
+			cursor = 0
+			redraw()
+		case 23: // Ctrl-W
+			for cursor > 0 && line[cursor-1] == ' ' {
+				line = append(line[:cursor-1], line[cursor:]...)
+				cursor--
+			}
+			for cursor > 0 && line[cursor-1] != ' ' {
+				line = append(line[:cursor-1], line[cursor:]...)
+				cursor--
+			}
+			redraw()
+		case 9: // Tab
+			start := cursor
+			for start > 0 && line[start-1] != ' ' {
+				start--
+			}
+			prefix := string(line[start:cursor])
+			completed := sh.Complete(prefix)
+			if completed != prefix {
+				replacement := []byte(completed)
+				line = append(append(append([]byte{}, line[:start]...), replacement...), line[cursor:]...)
+				cursor = start + len(replacement)
+				redraw()
+			}
+		case 27: // Common ANSI cursor/history sequences.
+			seq := make([]byte, 2)
+			if _, e := io.ReadFull(ch, seq); e != nil {
+				return
+			}
+			if seq[0] != '[' {
+				continue
+			}
+			switch seq[1] {
+			case 'A':
+				if historyAt > 0 {
+					historyAt--
+					line = []byte(history[historyAt])
+					cursor = len(line)
+					redraw()
+				}
+			case 'B':
+				if historyAt < len(history)-1 {
+					historyAt++
+					line = []byte(history[historyAt])
+				} else {
+					historyAt = len(history)
+					line = nil
+				}
+				cursor = len(line)
+				redraw()
+			case 'C':
+				if cursor < len(line) {
+					cursor++
+					io.WriteString(ch, "\x1b[C")
+				}
+			case 'D':
+				if cursor > 0 {
+					cursor--
+					io.WriteString(ch, "\x1b[D")
+				}
+			}
 		case 8, 127:
-			if line.Len() > 0 {
-				b := line.Bytes()
-				line.Reset()
-				line.Write(b[:len(b)-1])
-				io.WriteString(ch, "\b \b")
+			if cursor > 0 {
+				line = append(line[:cursor-1], line[cursor:]...)
+				cursor--
+				redraw()
 			}
 		default:
-			if line.Len() < 16<<10 {
-				line.WriteByte(buf[0])
-				ch.Write(buf)
+			if len(line) < 16<<10 {
+				line = append(line, 0)
+				copy(line[cursor+1:], line[cursor:])
+				line[cursor] = buf[0]
+				cursor++
+				redraw()
 			}
 		}
 	}
 }
 func (s *Server) recordCommand(ctx context.Context, sess *sensor.Session, input string, res emulator.Result) error {
-	if e := sess.Emit(ctx, "command", "success", map[string]any{"command": res.Command, "unsupported_syntax": res.Unsupported, "urls": res.URLs}, nil, model.Evidence{Kind: "command.arguments", ContentType: "text/plain", Data: []byte(res.Arguments)}); e != nil {
+	outcome := "success"
+	if res.ExitStatus != 0 {
+		outcome = "failure"
+	}
+	if e := sess.Emit(ctx, "command", outcome, map[string]any{"command": res.Command, "exit_status": res.ExitStatus, "unsupported_syntax": res.Unsupported, "emulation_gap": res.Gap, "observation": res.Observation, "urls": res.URLs}, nil, model.Evidence{Kind: "command.arguments", ContentType: "text/plain", Data: []byte(res.Arguments)}); e != nil {
 		return e
+	}
+	if res.Gap != "" {
+		if e := sess.Emit(ctx, "emulation.gap", "observed", map[string]any{"command": res.Command, "gap": res.Gap}, nil); e != nil {
+			return e
+		}
 	}
 	if b := sess.Transcript([]byte(input + "\n" + res.Output)); len(b) > 0 {
 		if e := sess.Emit(ctx, "transcript.chunk", "success", nil, nil, model.Evidence{Kind: "transcript", ContentType: "text/plain", Data: b}); e != nil {
@@ -230,6 +333,20 @@ func (s *Server) recordCommand(ctx context.Context, sess *sensor.Session, input 
 		}
 	}
 	return nil
+}
+
+func waitResult(ctx context.Context, delay time.Duration) bool {
+	if delay <= 0 {
+		return true
+	}
+	t := time.NewTimer(delay)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
 }
 
 type quarantineFS struct {

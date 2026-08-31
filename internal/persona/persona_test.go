@@ -1,9 +1,19 @@
 package persona
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+)
 
 func valid() Persona {
 	return Persona{Version: 1, ID: "p", Host: Host{Hostname: "host", OS: "Debian"}, Files: map[string]File{"/etc/hostname": {Content: "host", Mode: 0444}}, HTTP: HTTP{Routes: []Route{{Path: "/", Methods: []string{"GET"}, Status: 200}}}}
+}
+func TestBundledPersonasValidate(t *testing.T) {
+	for _, name := range []string{"default.yaml", "database-node.yaml", "router-appliance.yaml"} {
+		if _, e := Load(filepath.Join("..", "..", "personas", name)); e != nil {
+			t.Errorf("%s: %v", name, e)
+		}
+	}
 }
 func TestValidateRejectsTraversalAndExecutableFiles(t *testing.T) {
 	p := valid()

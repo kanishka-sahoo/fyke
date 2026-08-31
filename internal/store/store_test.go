@@ -170,3 +170,37 @@ func TestRetentionDeletesOldTranscriptBeforeMetadata(t *testing.T) {
 		t.Fatalf("unexpected retention: %#v", r)
 	}
 }
+
+func TestForEachSnapshotHasNoHiddenLimitAndStableHighWater(t *testing.T) {
+	root := t.TempDir()
+	id := filepath.Join(root, "identity")
+	cryptokit.GenerateIdentity(id)
+	seal, _ := cryptokit.Load(id)
+	st, e := Open(filepath.Join(root, "data"), seal)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	for i := 1; i <= 1205; i++ {
+		event := model.Event{SensorID: "ssh", SessionID: "bulk", Sequence: uint64(i), Protocol: "ssh", Type: "command"}
+		if e = st.Insert(ctx, event); e != nil {
+			t.Fatal(e)
+		}
+	}
+	seen := 0
+	count, e := st.ForEachSnapshot(ctx, Query{}, func(EventRecord) error {
+		seen++
+		if seen == 1 {
+			return st.Insert(ctx, model.Event{SensorID: "ssh", SessionID: "later", Sequence: 1, Protocol: "ssh", Type: "command"})
+		}
+		return nil
+	})
+	if e != nil || count != 1205 || seen != 1205 {
+		t.Fatalf("snapshot count=%d seen=%d error=%v", count, seen, e)
+	}
+	total, e := st.Count(ctx, Query{})
+	if e != nil || total != 1206 {
+		t.Fatalf("database count=%d error=%v", total, e)
+	}
+}

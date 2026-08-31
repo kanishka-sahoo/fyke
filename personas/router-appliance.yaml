@@ -1,0 +1,43 @@
+version: 2
+id: router-appliance-01
+host:
+  hostname: branch-rtr-01
+  os: Alpine Linux v3.19
+  kernel: 6.6.18-0-lts
+  ssh_banner: OpenSSH_9.6
+  telnet_banner: Branch Router Management Console
+  booted_at: 2026-04-02T19:30:00Z
+users:
+  - {name: root, uid: 0, home: /root, shell: /bin/ash}
+  - {name: admin, uid: 1000, home: /home/admin, shell: /bin/ash}
+honey_credentials:
+  - {username: admin, password: admin}
+files:
+  /etc/hostname: {mode: 420, content: "branch-rtr-01\n"}
+  /etc/network/interfaces: {mode: 420, content: "auto eth0\niface eth0 inet dhcp\nauto eth1\niface eth1 inet static\n  address 192.168.40.1/24\n"}
+  /home/admin/NOTICE: {mode: 420, content: "Managed by central network operations.\n"}
+shell:
+  environment: {TERM: xterm, DEVICE_ROLE: branch-router}
+  processes:
+    - {pid: "1", user: root, command: /sbin/init}
+    - {pid: "228", user: root, command: /usr/sbin/sshd}
+    - {pid: "310", user: root, command: /usr/sbin/dnsmasq}
+  services:
+    - {name: sshd, state: "active (running)", description: Secure shell server}
+    - {name: dnsmasq, state: "active (running)", description: DNS and DHCP service}
+  packages:
+    - {name: openssh, version: 9.6_p1-r0}
+    - {name: dnsmasq, version: 2.90-r2}
+  interfaces:
+    - {name: lo, address: 127.0.0.1/8, state: up}
+    - {name: eth0, address: 10.0.8.14/24, state: up}
+    - {name: eth1, address: 192.168.40.1/24, state: up}
+  commands:
+    - {command: route, args_prefix: [-n], output: "Kernel IP routing table\nDestination Gateway Genmask Flags Iface\n0.0.0.0 10.0.8.1 0.0.0.0 UG eth0\n192.168.40.0 0.0.0.0 255.255.255.0 U eth1\n", observation: network-discovery}
+http:
+  server: lighttpd/1.4.71
+  routes:
+    - {path: /, methods: [GET, HEAD], status: 200, content_type: "text/html; charset=utf-8", body: "<!doctype html><title>Branch Router</title><h1>Management</h1><a href=/login>Sign in</a>"}
+    - {path: /login, methods: [GET], status: 200, content_type: "text/html; charset=utf-8", body: "<form method=post><input name=user><input type=password name=password><button>Login</button></form>"}
+    - {path: /login, methods: [POST], status: 200, content_type: "text/html; charset=utf-8", body: "Welcome {{form.user}}", set_state: {authenticated: "true"}}
+    - {path_pattern: "/api/interfaces/{name}", methods: [GET], status: 200, content_type: application/json, body: '{"interface":"{{path.name}}","status":"up"}', require_state: {authenticated: "true"}}

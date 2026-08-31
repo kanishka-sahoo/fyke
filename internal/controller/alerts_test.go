@@ -3,10 +3,16 @@ package controller
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -130,5 +136,76 @@ func TestEventsRejectsInvalidTimeRange(t *testing.T) {
 	api.events(response, req)
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestWebhookDeliveryIsDurableIdempotentAndSigned(t *testing.T) {
+	st := alertTestStore(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	secret := "0123456789abcdef0123456789abcdef"
+	var received bool
+	listener, e := net.Listen("tcp4", "127.0.0.1:0")
+	if e != nil {
+		t.Skipf("local sockets unavailable: %v", e)
+	}
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		timestamp := r.Header.Get("X-Fyke-Timestamp")
+		mac := hmac.New(sha256.New, []byte(secret))
+		mac.Write([]byte(timestamp + "."))
+		mac.Write(body)
+		want := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+		if r.Header.Get("X-Fyke-Signature") != want {
+			t.Errorf("signature=%q want=%q", r.Header.Get("X-Fyke-Signature"), want)
+		}
+		if r.Header.Get("Idempotency-Key") != "alert-1" {
+			t.Errorf("idempotency key=%q", r.Header.Get("Idempotency-Key"))
+		}
+		received = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	server.Listener = listener
+	server.StartTLS()
+	defer server.Close()
+	engine := NewAlertEngine(ctx, st, NewBroker(), config.Alerts{WebhookSigningSecret: secret})
+	var storedSecret string
+	if e = st.DB().QueryRowContext(ctx, `SELECT value_json FROM settings WHERE key='alerts.webhook_signing_secret'`).Scan(&storedSecret); e != nil {
+		t.Fatal(e)
+	}
+	if strings.Contains(storedSecret, secret) {
+		t.Fatal("webhook signing secret stored in plaintext")
+	}
+	engine.client = server.Client()
+	payload := []byte(`{"id":"alert-1"}`)
+	if e := st.EnqueueAlertDeliveries(ctx, "alert-1", payload, []string{server.URL}); e != nil {
+		t.Fatal(e)
+	}
+	items, e := st.DueAlertDeliveries(ctx, time.Now().Add(time.Second), 1)
+	if e != nil || len(items) != 1 {
+		t.Fatalf("deliveries=%#v error=%v", items, e)
+	}
+	engine.deliverOne(ctx, items[0])
+	if !received {
+		t.Fatal("webhook not received")
+	}
+	items, _, e = st.AlertDeliveries(ctx, 10, 0)
+	if e != nil || len(items) != 1 || items[0].Status != "delivered" || items[0].Attempts != 1 {
+		t.Fatalf("stored delivery=%#v error=%v", items, e)
+	}
+}
+
+func TestWebhookSigningSecretIsProtectedAtRest(t *testing.T) {
+	st := alertTestStore(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	secret := "0123456789abcdef0123456789abcdef"
+	_ = NewAlertEngine(ctx, st, NewBroker(), config.Alerts{WebhookSigningSecret: secret})
+	var raw string
+	if e := st.DB().QueryRowContext(ctx, `SELECT value_json FROM settings WHERE key='alerts.webhook_signing_secret'`).Scan(&raw); e != nil {
+		t.Fatal(e)
+	}
+	if strings.Contains(raw, secret) {
+		t.Fatal("webhook signing secret stored in plaintext")
 	}
 }

@@ -37,5 +37,5 @@ jobs:
       - working-directory: frontend
         run: npm run build
       - run: git diff --exit-code -- internal/web/dist
-      - run: bash -n deploy.sh install-docker.sh
+      - run: bash -n deploy.sh install-docker.sh scripts/load-check.sh
       - run: docker compose config --quiet

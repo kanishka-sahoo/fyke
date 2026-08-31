@@ -1,4 +1,4 @@
-version: 1
+version: 2
 id: debian-edge-01
 host:
   hostname: edge-gw-01
@@ -17,9 +17,30 @@ files:
   /etc/os-release: {mode: 420, content: "PRETTY_NAME=\"Debian GNU/Linux 12 (bookworm)\"\n"}
   /etc/passwd: {mode: 420, content: "root:x:0:0:root:/root:/bin/bash\ndeploy:x:1001:1001:Deploy:/home/deploy:/bin/bash\n"}
   /home/deploy/README.txt: {mode: 420, content: "Edge deployment staging host.\n"}
+shell:
+  environment: {APP_ENV: production, REGION: eu-west}
+  processes:
+    - {pid: "1", user: root, command: /sbin/init}
+    - {pid: "412", user: root, command: "sshd: /usr/sbin/sshd -D"}
+    - {pid: "876", user: www-data, command: "nginx: worker process"}
+  services:
+    - {name: ssh, state: "active (running)", description: OpenBSD Secure Shell server}
+    - {name: nginx, state: "active (running)", description: A high performance web server}
+  packages:
+    - {name: openssh-server, version: "1:9.2p1-2+deb12u5"}
+    - {name: nginx, version: "1.22.1-9"}
+  interfaces:
+    - {name: lo, address: 127.0.0.1/8, state: up}
+    - {name: eth0, address: 10.0.0.12/24, state: up}
+  commands:
+    - {command: docker, args_prefix: [ps], output: "CONTAINER ID   IMAGE          STATUS       NAMES\n9c03a91e4f10   edge-api:1.8   Up 11 days   edge-api\n", observation: container-discovery}
+  network:
+    - {url_prefix: "https://updates.example.invalid/", outcome: success, body: "release=1.8.4\n", filename: release.txt}
 http:
   server: nginx/1.22.1
   routes:
     - {path: /, methods: [GET, HEAD], status: 200, content_type: "text/html; charset=utf-8", body: "<!doctype html><title>Edge Gateway</title><h1>Gateway Console</h1>"}
-    - {path: /login, methods: [GET, POST], status: 200, content_type: "text/html; charset=utf-8", body: "<!doctype html><title>Sign in</title><form method=post><input name=username><input name=password type=password></form>"}
+    - {path: /login, methods: [GET], status: 200, content_type: "text/html; charset=utf-8", body: "<!doctype html><title>Sign in</title><form method=post><input name=username><input name=password type=password></form>"}
+    - {path: /login, methods: [POST], status: 200, content_type: "text/html; charset=utf-8", body: "Signed in as {{form.username}}", set_state: {authenticated: "true", username: "{{form.username}}"}, delay_ms: 180}
+    - {path_pattern: "/admin/{section}", methods: [GET], status: 200, content_type: "text/html; charset=utf-8", body: "<!doctype html><title>Gateway {{path.section}}</title><h1>{{path.section}}</h1><p>Host {{persona.host.hostname}}</p>", require_state: {authenticated: "true"}}
     - {path: /api/upload, methods: [POST, PUT], status: 201, content_type: application/json, body: "{\"status\":\"queued\"}", upload: true}

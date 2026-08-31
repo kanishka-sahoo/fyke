@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -36,8 +37,12 @@ type EventRecord struct {
 	EvidenceRefs []EvidenceRef `json:"evidence_refs,omitempty"`
 }
 type EvidenceRef struct {
-	ID, Kind, ContentType, Filename, SHA256 string
-	Size                                    int64
+	ID          string `json:"id"`
+	Kind        string `json:"kind"`
+	ContentType string `json:"content_type,omitempty"`
+	Filename    string `json:"filename,omitempty"`
+	SHA256      string `json:"sha256"`
+	Size        int64  `json:"size"`
 }
 type Overview struct {
 	Events24h    int64            `json:"events_24h"`
@@ -90,8 +95,20 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS sensors(id TEXT PRIMARY KEY,last_seen TEXT NOT NULL,last_session TEXT,last_sequence INTEGER NOT NULL DEFAULT 0,status TEXT NOT NULL DEFAULT 'healthy')`,
 		`CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value_json TEXT NOT NULL,updated_at TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS audit(id TEXT PRIMARY KEY,timestamp TEXT NOT NULL,action TEXT NOT NULL,remote_ip TEXT,details_json TEXT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS observables(event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,kind TEXT NOT NULL,value TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(event_id,kind,value))`,
+		`CREATE INDEX IF NOT EXISTS observables_pivot ON observables(kind,value,created_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS evidence_correlations(evidence_id TEXT PRIMARY KEY REFERENCES evidence(id) ON DELETE CASCADE,event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,kind TEXT NOT NULL,token TEXT NOT NULL,created_at TEXT NOT NULL)`,
+		`CREATE INDEX IF NOT EXISTS evidence_correlation_token ON evidence_correlations(kind,token,created_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS findings(id TEXT PRIMARY KEY,rule TEXT NOT NULL,rule_version INTEGER NOT NULL,fingerprint TEXT NOT NULL,title TEXT NOT NULL,summary TEXT NOT NULL,severity TEXT NOT NULL,status TEXT NOT NULL,source_ip TEXT,first_seen TEXT NOT NULL,last_seen TEXT NOT NULL,event_count INTEGER NOT NULL,observables_json TEXT NOT NULL,updated_at TEXT NOT NULL,last_alerted_at TEXT,UNIQUE(rule,fingerprint))`,
+		`CREATE INDEX IF NOT EXISTS findings_status ON findings(status,severity,last_seen DESC)`,
+		`CREATE TABLE IF NOT EXISTS finding_events(finding_id TEXT NOT NULL REFERENCES findings(id) ON DELETE CASCADE,event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,PRIMARY KEY(finding_id,event_id))`,
+		`CREATE TABLE IF NOT EXISTS alert_deliveries(id TEXT PRIMARY KEY,alert_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,endpoint TEXT NOT NULL,payload BLOB NOT NULL,status TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,next_attempt TEXT NOT NULL,last_error TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL,updated_at TEXT NOT NULL,delivered_at TEXT,UNIQUE(alert_id,endpoint))`,
+		`CREATE INDEX IF NOT EXISTS alert_deliveries_due ON alert_deliveries(status,next_attempt)`,
+		`CREATE TABLE IF NOT EXISTS source_context(source_ip TEXT PRIMARY KEY,label TEXT NOT NULL DEFAULT '',ignored INTEGER NOT NULL DEFAULT 0,country TEXT NOT NULL DEFAULT '',asn TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS artifact_analysis(artifact_id TEXT PRIMARY KEY REFERENCES evidence(id) ON DELETE CASCADE,status TEXT NOT NULL,result_json TEXT NOT NULL,error TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL,updated_at TEXT NOT NULL)`,
 		`CREATE VIRTUAL TABLE IF NOT EXISTS event_search USING fts5(id UNINDEXED,source_ip,protocol,event_type,outcome,content)`,
-		`INSERT OR IGNORE INTO migrations(version,applied_at) VALUES(1,datetime('now'))`}
+		`INSERT OR IGNORE INTO migrations(version,applied_at) VALUES(1,datetime('now'))`,
+		`INSERT OR IGNORE INTO migrations(version,applied_at) VALUES(2,datetime('now'))`}
 	for _, q := range stmts {
 		if _, e = tx.ExecContext(ctx, q); e != nil {
 			return fmt.Errorf("migration: %w", e)
@@ -136,6 +153,11 @@ func (s *Store) Insert(ctx context.Context, e model.Event) error {
 	if _, err = tx.ExecContext(ctx, `INSERT INTO event_search(id,source_ip,protocol,event_type,outcome,content) VALUES(?,?,?,?,?,?)`, e.ID, e.Source.IP, e.Protocol, e.Type, e.Outcome, search); err != nil {
 		return err
 	}
+	for _, observable := range extractObservables(e) {
+		if _, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO observables(event_id,kind,value,created_at) VALUES(?,?,?,?)`, e.ID, observable.Kind, observable.Value, e.Timestamp.UTC().Format(time.RFC3339Nano)); err != nil {
+			return err
+		}
+	}
 	for _, ev := range e.Evidence {
 		sealed, er := s.sealer.Seal(ev.Data)
 		if er != nil {
@@ -158,6 +180,15 @@ func (s *Store) Insert(ctx context.Context, e model.Event) error {
 			name = filepath.Base(strings.ReplaceAll(ev.Filename, "\\", "/"))
 		}
 		if _, er = tx.ExecContext(ctx, `INSERT INTO evidence VALUES(?,?,?,?,?,?,?,?,?)`, id, e.ID, ev.Kind, ev.ContentType, name, hash, len(ev.Data), rel, e.Timestamp.UTC().Format(time.RFC3339Nano)); er != nil {
+			return er
+		}
+		if ev.Kind == "credential.password" {
+			token := s.sealer.CorrelationToken("credential.password", ev.Data)
+			if _, er = tx.ExecContext(ctx, `INSERT INTO evidence_correlations(evidence_id,event_id,kind,token,created_at) VALUES(?,?,?,?,?)`, id, e.ID, ev.Kind, token, e.Timestamp.UTC().Format(time.RFC3339Nano)); er != nil {
+				return er
+			}
+		}
+		if _, er = tx.ExecContext(ctx, `INSERT OR IGNORE INTO observables(event_id,kind,value,created_at) VALUES(?,?,?,?)`, e.ID, "artifact.sha256", hash, e.Timestamp.UTC().Format(time.RFC3339Nano)); er != nil {
 			return er
 		}
 	}
@@ -408,6 +439,30 @@ func (s *Store) GetSetting(ctx context.Context, key string, value any) (bool, er
 		return false, fmt.Errorf("decode setting %q: %w", key, e)
 	}
 	return true, nil
+}
+
+func (s *Store) SetProtectedSetting(ctx context.Context, key, value string) error {
+	sealed, e := s.sealer.Seal([]byte(value))
+	if e != nil {
+		return e
+	}
+	return s.SetSetting(ctx, key, base64.RawStdEncoding.EncodeToString(sealed))
+}
+func (s *Store) GetProtectedSetting(ctx context.Context, key string) (string, bool, error) {
+	var encoded string
+	found, e := s.GetSetting(ctx, key, &encoded)
+	if e != nil || !found {
+		return "", found, e
+	}
+	sealed, e := base64.RawStdEncoding.DecodeString(encoded)
+	if e != nil {
+		return "", false, e
+	}
+	plain, e := s.sealer.Open(sealed)
+	if e != nil {
+		return "", false, e
+	}
+	return string(plain), true, nil
 }
 func (s *Store) IntegrityCheck(ctx context.Context) error {
 	var v string

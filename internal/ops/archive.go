@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
@@ -37,15 +38,17 @@ func Backup(ctx context.Context, c config.Config, recipient, out string) error {
 	if _, e = os.Stat(out); e == nil {
 		return fmt.Errorf("refusing to overwrite %s", out)
 	}
-	sealer, e := cryptokit.Load(c.Controller.Identity)
+	if _, e = cryptokit.Load(c.Controller.Identity); e != nil {
+		return e
+	}
+	db, e := sql.Open("sqlite", filepath.Join(c.DataDir, "fyke.db")+"?_pragma=busy_timeout(10000)")
 	if e != nil {
 		return e
 	}
-	st, e := store.Open(c.DataDir, sealer)
-	if e != nil {
+	defer db.Close()
+	if e = db.PingContext(ctx); e != nil {
 		return e
 	}
-	defer st.Close()
 	tmp, e := os.MkdirTemp(filepath.Dir(out), ".fyke-backup-")
 	if e != nil {
 		return e
@@ -53,11 +56,14 @@ func Backup(ctx context.Context, c config.Config, recipient, out string) error {
 	defer os.RemoveAll(tmp)
 	dbCopy := filepath.Join(tmp, "fyke.db")
 	escaped := strings.ReplaceAll(dbCopy, "'", "''")
-	if _, e = st.DB().ExecContext(ctx, "VACUUM INTO '"+escaped+"'"); e != nil {
+	if _, e = db.ExecContext(ctx, "VACUUM INTO '"+escaped+"'"); e != nil {
 		return e
 	}
 	files := map[string]string{"database/fyke.db": dbCopy}
 	e = filepath.Walk(filepath.Join(c.DataDir, "artifacts"), func(p string, i os.FileInfo, e error) error {
+		if os.IsNotExist(e) {
+			return nil
+		}
 		if e != nil {
 			return e
 		}
@@ -207,7 +213,7 @@ func Restore(backup, identity, target string) error {
 	}
 	return nil
 }
-func Export(ctx context.Context, c config.Config, format, out string, sensitive bool) error {
+func Export(ctx context.Context, c config.Config, format, out string, sensitive bool, recipient string) error {
 	sealer, e := cryptokit.Load(c.Controller.Identity)
 	if e != nil {
 		return e
@@ -217,9 +223,11 @@ func Export(ctx context.Context, c config.Config, format, out string, sensitive 
 		return e
 	}
 	defer st.Close()
-	rows, e := st.List(ctx, store.Query{Limit: 1000})
-	if e != nil {
-		return e
+	if sensitive {
+		if out == "" || recipient == "" {
+			return fmt.Errorf("sensitive export requires --out and --recipient")
+		}
+		return exportInvestigationBundle(ctx, st, out, recipient)
 	}
 	var w io.Writer = os.Stdout
 	var f *os.File
@@ -235,39 +243,104 @@ func Export(ctx context.Context, c config.Config, format, out string, sensitive 
 	switch format {
 	case "jsonl":
 		enc := json.NewEncoder(w)
-		for _, x := range rows {
-			var value any = x
-			if sensitive {
-				evidence := []map[string]any{}
-				for _, ref := range x.EvidenceRefs {
-					_, b, readErr := st.Evidence(ctx, ref.ID)
-					if readErr != nil {
-						return readErr
-					}
-					evidence = append(evidence, map[string]any{"reference": ref, "data": b})
-				}
-				value = map[string]any{"event": x, "sensitive_evidence": evidence}
-			}
-			if e = enc.Encode(value); e != nil {
-				return e
-			}
-		}
+		_, e = st.ForEachSnapshot(ctx, store.Query{}, func(x store.EventRecord) error { return enc.Encode(x) })
+		return e
 	case "csv":
 		cw := csv.NewWriter(w)
 		if e = cw.Write([]string{"id", "timestamp", "sensor_id", "session_id", "source_ip", "protocol", "event_type", "outcome"}); e != nil {
 			return e
 		}
-		for _, x := range rows {
-			if e = cw.Write([]string{x.ID, x.Timestamp.Format(time.RFC3339Nano), x.SensorID, x.SessionID, x.Source.IP, x.Protocol, x.Type, x.Outcome}); e != nil {
-				return e
-			}
+		_, e = st.ForEachSnapshot(ctx, store.Query{}, func(x store.EventRecord) error {
+			return cw.Write([]string{x.ID, x.Timestamp.Format(time.RFC3339Nano), x.SensorID, x.SessionID, x.Source.IP, x.Protocol, x.Type, x.Outcome})
+		})
+		if e != nil {
+			return e
 		}
 		cw.Flush()
 		return cw.Error()
 	default:
 		return fmt.Errorf("format must be jsonl or csv")
 	}
-	return nil
+}
+
+func exportInvestigationBundle(ctx context.Context, st *store.Store, out, recipient string) error {
+	r, e := age.ParseX25519Recipient(recipient)
+	if e != nil {
+		return e
+	}
+	if _, e = os.Stat(out); e == nil {
+		return fmt.Errorf("refusing to overwrite %s", out)
+	}
+	tmp, e := os.CreateTemp(filepath.Dir(out), ".fyke-investigation-events-")
+	if e != nil {
+		return e
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	enc := json.NewEncoder(tmp)
+	var refs []store.EvidenceRef
+	count, e := st.ForEachSnapshot(ctx, store.Query{}, func(x store.EventRecord) error {
+		refs = append(refs, x.EvidenceRefs...)
+		return enc.Encode(x)
+	})
+	if closeErr := tmp.Close(); e == nil {
+		e = closeErr
+	}
+	if e != nil {
+		return e
+	}
+	f, e := os.OpenFile(out, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if e != nil {
+		return e
+	}
+	ok := false
+	defer func() {
+		_ = f.Close()
+		if !ok {
+			_ = os.Remove(out)
+		}
+	}()
+	aw, e := age.Encrypt(f, r)
+	if e != nil {
+		return e
+	}
+	tw := tar.NewWriter(aw)
+	meta, _ := json.MarshalIndent(map[string]any{"version": 1, "created_at": time.Now().UTC(), "events": count, "artifacts": len(refs)}, "", "  ")
+	if e = tarBytes(tw, "manifest.json", meta, 0600); e != nil {
+		return e
+	}
+	if e = tarFile(tw, "events.jsonl", tmpName); e != nil {
+		return e
+	}
+	for _, ref := range refs {
+		_, body, readErr := st.Evidence(ctx, ref.ID)
+		if readErr != nil {
+			return readErr
+		}
+		name := filepath.ToSlash(filepath.Join("artifacts", ref.ID, safeBundleName(ref.Filename)))
+		if e = tarBytes(tw, name, body, 0600); e != nil {
+			return e
+		}
+	}
+	if e = tw.Close(); e != nil {
+		return e
+	}
+	if e = aw.Close(); e != nil {
+		return e
+	}
+	if e = f.Close(); e != nil {
+		return e
+	}
+	ok = true
+	return st.Audit(ctx, "investigation.bundle.export", "cli", map[string]any{"events": count, "artifacts": len(refs), "output": out})
+}
+
+func safeBundleName(name string) string {
+	name = filepath.Base(strings.ReplaceAll(name, "\\", "/"))
+	if name == "" || name == "." {
+		return "evidence.bin"
+	}
+	return name
 }
 func hashFile(p string) (string, error) {
 	f, e := os.Open(p)
