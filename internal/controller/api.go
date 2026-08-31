@@ -191,7 +191,7 @@ func (a *API) events(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	total, e := a.store.Count(r.Context(), q)
-	respond(w, map[string]any{"items": v, "limit": q.Limit, "offset": q.Offset, "total": total}, e)
+	respondPage(w, v, q.Limit, q.Offset, total, e)
 }
 
 func parseEventQuery(r *http.Request) (store.Query, error) {
@@ -267,12 +267,12 @@ func (a *API) stream(w http.ResponseWriter, r *http.Request) {
 func (a *API) sessions(w http.ResponseWriter, r *http.Request) {
 	limit, offset := pageValues(r)
 	items, total, e := a.store.Sessions(r.Context(), limit, offset)
-	respond(w, map[string]any{"items": items, "limit": limit, "offset": offset, "total": total}, e)
+	respondPage(w, items, limit, offset, total, e)
 }
 func (a *API) sources(w http.ResponseWriter, r *http.Request) {
 	limit, offset := pageValues(r)
 	items, total, e := a.store.Sources(r.Context(), limit, offset)
-	respond(w, map[string]any{"items": items, "limit": limit, "offset": offset, "total": total}, e)
+	respondPage(w, items, limit, offset, total, e)
 }
 
 func (a *API) sourceContext(w http.ResponseWriter, r *http.Request) {
@@ -336,7 +336,7 @@ func (a *API) importSourceContext(w http.ResponseWriter, r *http.Request) {
 func (a *API) artifacts(w http.ResponseWriter, r *http.Request) {
 	limit, offset := pageValues(r)
 	items, total, e := a.store.Artifacts(r.Context(), limit, offset, r.URL.Query().Get("sha256"))
-	respond(w, map[string]any{"items": items, "limit": limit, "offset": offset, "total": total}, e)
+	respondPage(w, items, limit, offset, total, e)
 }
 func (a *API) alerts(w http.ResponseWriter, r *http.Request) {
 	limit, offset := pageValues(r)
@@ -347,13 +347,13 @@ func (a *API) alerts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	total, e := a.store.Count(r.Context(), query)
-	respond(w, map[string]any{"items": rows, "limit": limit, "offset": offset, "total": total}, e)
+	respondPage(w, rows, limit, offset, total, e)
 }
 
 func (a *API) findings(w http.ResponseWriter, r *http.Request) {
 	limit, offset := pageValues(r)
 	items, total, e := a.store.Findings(r.Context(), limit, offset, r.URL.Query().Get("status"), r.URL.Query().Get("source"))
-	respond(w, map[string]any{"items": items, "limit": limit, "offset": offset, "total": total}, e)
+	respondPage(w, items, limit, offset, total, e)
 }
 
 func (a *API) finding(w http.ResponseWriter, r *http.Request) {
@@ -368,7 +368,7 @@ func (a *API) finding(w http.ResponseWriter, r *http.Request) {
 func (a *API) findingEvents(w http.ResponseWriter, r *http.Request) {
 	limit, offset := pageValues(r)
 	items, total, e := a.store.FindingEvents(r.Context(), r.PathValue("id"), limit, offset)
-	respond(w, map[string]any{"items": items, "limit": limit, "offset": offset, "total": total}, e)
+	respondPage(w, items, limit, offset, total, e)
 }
 
 func (a *API) findingStatus(w http.ResponseWriter, r *http.Request) {
@@ -397,13 +397,13 @@ func (a *API) observablePivot(w http.ResponseWriter, r *http.Request) {
 	}
 	limit, offset := pageValues(r)
 	items, total, e := a.store.PivotEvents(r.Context(), kind, value, limit, offset)
-	respond(w, map[string]any{"items": items, "limit": limit, "offset": offset, "total": total}, e)
+	respondPage(w, items, limit, offset, total, e)
 }
 
 func (a *API) alertDeliveries(w http.ResponseWriter, r *http.Request) {
 	limit, offset := pageValues(r)
 	items, total, e := a.store.AlertDeliveries(r.Context(), limit, offset)
-	respond(w, map[string]any{"items": items, "limit": limit, "offset": offset, "total": total}, e)
+	respondPage(w, items, limit, offset, total, e)
 }
 
 func (a *API) retryAlertDelivery(w http.ResponseWriter, r *http.Request) {
@@ -525,7 +525,7 @@ func (a *API) export(w http.ResponseWriter, r *http.Request) {
 func (a *API) audit(w http.ResponseWriter, r *http.Request) {
 	limit, offset := pageValues(r)
 	items, total, e := a.store.AuditRecords(r.Context(), limit, offset)
-	respond(w, map[string]any{"items": items, "limit": limit, "offset": offset, "total": total}, e)
+	respondPage(w, items, limit, offset, total, e)
 }
 
 func (a *API) storage(w http.ResponseWriter, r *http.Request) {
@@ -617,6 +617,13 @@ func respond(w http.ResponseWriter, v any, e error) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(v)
+}
+
+func respondPage[T any](w http.ResponseWriter, items []T, limit, offset int, total int64, e error) {
+	if items == nil {
+		items = []T{}
+	}
+	respond(w, map[string]any{"items": items, "limit": limit, "offset": offset, "total": total}, e)
 }
 func problem(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/problem+json")

@@ -1,4 +1,4 @@
-import {FormEvent, ReactNode, useEffect, useMemo, useState} from 'react';
+import {Component, ErrorInfo, FormEvent, ReactNode, useEffect, useMemo, useState} from 'react';
 
 type Endpoint={ip:string;port:number};
 type EvidenceRef={ID?:string;Kind?:string;ContentType?:string;Filename?:string;SHA256?:string;Size?:number;id?:string;kind?:string;content_type?:string;filename?:string;sha256?:string;size?:number};
@@ -10,10 +10,10 @@ type Insight={id:string;severity:'high'|'medium'|'low';title:string;description:
 type Route={page:'overview'|'activity'|'sessions'|'session'|'sources'|'source'|'artifacts'|'alerts'|'settings'|'event'|'raw'|'not-found';id?:string;rawKind?:'events'|'sessions'|'sources'};
 type TimeRange='15m'|'1h'|'24h'|'7d'|'all'|'custom';
 export type ActivityFilters={search:string;protocol:string;type:string;outcome:string;range:TimeRange;customSince:string;customUntil:string};
-type EventPageResponse={items:EventItem[];limit:number;offset:number;total:number};
-type PageResponse<T>={items:T[];limit:number;offset:number;total:number};
+type EventPageResponse={items:EventItem[]|null;limit:number;offset:number;total:number};
+type PageResponse<T>={items:T[]|null;limit:number;offset:number;total:number};
 type Finding={id:string;rule:string;title:string;summary:string;severity:'critical'|'high'|'medium'|'low';status:'open'|'acknowledged'|'resolved';source_ip?:string;first_seen:string;last_seen:string;event_count:number;observables?:{kind:string;value:string}[]};
-type AlertPreferences={webhooks:string[];source_spike_per_minute:number;webhook_signing_secret?:string;rules?:Record<string,{enabled:boolean;severity?:string;cooldown_minutes?:number}>};
+type AlertPreferences={webhooks:string[]|null;source_spike_per_minute:number;webhook_signing_secret?:string;rules?:Record<string,{enabled:boolean;severity?:string;cooldown_minutes?:number}>};
 type RulePreference={enabled:boolean;severity:string;cooldown_minutes:number};
 
 const nav=[['Overview','/'],['Activity','/activity'],['Sessions','/sessions'],['Sources','/sources'],['Artifacts','/artifacts'],['Alerts','/alerts']] as const;
@@ -21,6 +21,14 @@ const severityRank={high:3,medium:2,low:1};
 const eventTypes=['authentication.attempt','command','emulation.gap','http.request','http.malformed','artifact.upload','ssh.scp','session.start','session.end','transcript.chunk','alert'];
 const timeRanges:[TimeRange,string][]=[['15m','15 min'],['1h','1 hour'],['24h','24 hours'],['7d','7 days'],['all','All time'],['custom','Custom']];
 const defaultAlertRules:Record<string,RulePreference>={successful_emulated_login:{enabled:true,severity:'high',cooldown_minutes:15},artifact_upload:{enabled:true,severity:'high',cooldown_minutes:15},unhealthy_sensor:{enabled:true,severity:'high',cooldown_minutes:0},post_login_activity:{enabled:true,severity:'medium',cooldown_minutes:15},staged_download:{enabled:true,severity:'high',cooldown_minutes:15},novel_fingerprint:{enabled:true,severity:'medium',cooldown_minutes:15},source_spike:{enabled:true,severity:'medium',cooldown_minutes:15},cross_protocol_activity:{enabled:true,severity:'medium',cooldown_minutes:15},http_enumeration:{enabled:true,severity:'medium',cooldown_minutes:15},reused_secret:{enabled:true,severity:'medium',cooldown_minutes:15},emulation_gap:{enabled:true,severity:'low',cooldown_minutes:15}};
+
+export function pageItems<T>(page?:{items?:T[]|null}):T[]{
+  return Array.isArray(page?.items)?page.items:[];
+}
+
+export function joinLines(items?:string[]|null):string{
+  return (items||[]).join('\n');
+}
 
 export function parseRoute(pathname:string):Route {
   const parts=pathname.split('/').filter(Boolean).map(part=>{try{return decodeURIComponent(part)}catch{return part}});
@@ -48,18 +56,18 @@ function useData<T>(url:string){
 
 function useCompleteEvents(filter:string){
   const[data,setData]=useState<EventItem[]>([]);const[error,setError]=useState('');const[loading,setLoading]=useState(true);
-  useEffect(()=>{let active=true;(async()=>{setLoading(true);setError('');const all:EventItem[]=[];let offset=0;for(;;){const page=await get<EventPageResponse>(`/api/v1/events?${filter}&limit=500&offset=${offset}`);all.push(...(page.items||[]));offset+=page.items.length;if(offset>=page.total||page.items.length===0)break}if(active)setData(all)})().catch(e=>active&&setError(e instanceof Error?e.message:String(e))).finally(()=>active&&setLoading(false));return()=>{active=false}},[filter]);
+  useEffect(()=>{let active=true;(async()=>{setLoading(true);setError('');const all:EventItem[]=[];let offset=0;for(;;){const page=await get<EventPageResponse>(`/api/v1/events?${filter}&limit=500&offset=${offset}`);const items=pageItems(page);all.push(...items);offset+=items.length;if(offset>=page.total||items.length===0)break}if(active)setData(all)})().catch(e=>active&&setError(e instanceof Error?e.message:String(e))).finally(()=>active&&setLoading(false));return()=>{active=false}},[filter]);
   return{data,error,loading};
 }
 
 function useCompletePage<T>(base:string){
   const[data,setData]=useState<T[]>([]);const[total,setTotal]=useState(0);const[error,setError]=useState('');const[loading,setLoading]=useState(true);
-  useEffect(()=>{let active=true;(async()=>{setLoading(true);setError('');const all:T[]=[];let offset=0;const separator=base.includes('?')?'&':'?';for(;;){const page=await get<PageResponse<T>>(`${base}${separator}limit=500&offset=${offset}`);all.push(...(page.items||[]));offset+=page.items.length;if(offset>=page.total||page.items.length===0){if(active)setTotal(page.total);break}}if(active)setData(all)})().catch(e=>active&&setError(e instanceof Error?e.message:String(e))).finally(()=>active&&setLoading(false));return()=>{active=false}},[base]);
+  useEffect(()=>{let active=true;(async()=>{setLoading(true);setError('');const all:T[]=[];let offset=0;const separator=base.includes('?')?'&':'?';for(;;){const page=await get<PageResponse<T>>(`${base}${separator}limit=500&offset=${offset}`);const items=pageItems(page);all.push(...items);offset+=items.length;if(offset>=page.total||items.length===0){if(active)setTotal(page.total);break}}if(active)setData(all)})().catch(e=>active&&setError(e instanceof Error?e.message:String(e))).finally(()=>active&&setLoading(false));return()=>{active=false}},[base]);
   return{data,total,error,loading};
 }
 
 function useEventFeed(url:string){
-  const{data,error,loading}=useData<{items:EventItem[]}>(url);const[items,setItems]=useState<EventItem[]>([]);
+  const{data,error,loading}=useData<{items:EventItem[]|null}>(url);const[items,setItems]=useState<EventItem[]>([]);
   useEffect(()=>{if(data)setItems(data.items||[])},[data]);
   useEffect(()=>{const stream=new EventSource('/api/v1/stream');const receive=(raw:Event)=>{const next=JSON.parse((raw as MessageEvent).data) as EventItem;setItems(current=>current.some(item=>item.id===next.id)?current:[next,...current].slice(0,1000))};stream.addEventListener('event',receive);return()=>stream.close()},[]);
   return{items,error,loading};
@@ -82,8 +90,15 @@ export function App(){
       <nav aria-label="Primary navigation">{nav.map(([label,href])=><AppLink key={href} href={href} go={go} className={active===label.toLowerCase()?'active':undefined}>{label}</AppLink>)}</nav>
       <div className="topbar-actions"><span className="collector-state"><i/>collecting</span><button className="quiet-button" onClick={()=>setTheme(theme==='dark'?'light':'dark')} aria-label="Switch color theme">{theme==='dark'?'Light':'Dark'}</button><AppLink href="/settings" go={go} className={active==='settings'?'icon-link active':'icon-link'} title="Settings">⌁</AppLink></div>
     </header>
-    <main id="main" className="page-shell"><Page route={route} go={go} overview={overview}/></main>
+    <main id="main" className="page-shell"><PageErrorBoundary key={`${route.page}:${route.id||''}`}><Page route={route} go={go} overview={overview}/></PageErrorBoundary></main>
   </>;
+}
+
+class PageErrorBoundary extends Component<{children:ReactNode},{message:string}>{
+  state={message:''};
+  static getDerivedStateFromError(error:unknown){return{message:error instanceof Error?error.message:String(error)}}
+  componentDidCatch(error:unknown,info:ErrorInfo){console.error('Fyke page render failed',error,info.componentStack)}
+  render(){return this.state.message?<div className="page-stack"><ErrorState message={this.state.message}/><button className="button" onClick={()=>window.location.reload()}>Reload page</button></div>:this.props.children}
 }
 
 function Page({route,go,overview}:{route:Route;go:(href:string)=>void;overview?:Overview}){
@@ -214,16 +229,17 @@ function ArtifactsPage(){
 
 function AlertsPage({go}:{go:(href:string)=>void}){
   const[refresh,setRefresh]=useState(0);const[selected,setSelected]=useState('');const{data,error,loading}=useData<PageResponse<Finding>>(`/api/v1/findings?limit=100&refresh=${refresh}`);const{data:deliveries}=useData<PageResponse<Row>>(`/api/v1/alert-deliveries?limit=25&refresh=${refresh}`);
+  const findings=pageItems(data);
   async function status(id:string,value:string){await requestJSON(`/api/v1/findings/${encodeURIComponent(id)}/status`,'PUT',{status:value});setRefresh(x=>x+1)}
   async function retry(id:string){await requestJSON(`/api/v1/alert-deliveries/${encodeURIComponent(id)}/retry`,'POST',{});setRefresh(x=>x+1)}
-  return <div className="page-stack" data-refresh={refresh}><PageHeader eyebrow="Detection queue" title="Findings & alerts" description="Explainable persisted analysis and the delivery state of outbound notifications."/>{error&&<ErrorState message={error}/>} {loading?<TableSkeleton/>:<section className="surface alert-list">{data?.items.length?data.items.map(item=><div className="alert-row" key={item.id}><span className="alert-mark">!</span><span><b>{item.title}</b><small>{item.summary} · {item.source_ip||'Controller'} · {formatDate(item.last_seen)}</small></span><div className="row-controls"><select value={item.status} onChange={e=>status(item.id,e.target.value)}><option value="open">Open</option><option value="acknowledged">Acknowledged</option><option value="resolved">Resolved</option></select><button className="row-action" onClick={()=>setSelected(item.id)}>Evidence</button>{item.source_ip&&<AppLink href={`/sources/${encodeURIComponent(item.source_ip)}`} go={go}>Source →</AppLink>}</div></div>):<EmptyState title="No findings" body="Explainable rule matches will appear here while the complete evidence trail remains in Activity."/>}</section>}{selected&&<FindingEvidence id={selected} go={go}/>}<section className="surface"><SectionHeading title="Webhook deliveries" note="Durable at-least-once handoff"/><DataTable columns={['status','endpoint','attempts','last_error','updated_at']} rows={deliveries?.items||[]} keyField="id" actionLabel="Retry" onOpen={row=>row.status==='failed'&&retry(String(row.id))}/></section></div>;
+  return <div className="page-stack" data-refresh={refresh}><PageHeader eyebrow="Detection queue" title="Findings & alerts" description="Explainable persisted analysis and the delivery state of outbound notifications."/>{error&&<ErrorState message={error}/>} {loading?<TableSkeleton/>:<section className="surface alert-list">{findings.length?findings.map(item=><div className="alert-row" key={item.id}><span className="alert-mark">!</span><span><b>{item.title}</b><small>{item.summary} · {item.source_ip||'Controller'} · {formatDate(item.last_seen)}</small></span><div className="row-controls"><select value={item.status} onChange={e=>status(item.id,e.target.value)}><option value="open">Open</option><option value="acknowledged">Acknowledged</option><option value="resolved">Resolved</option></select><button className="row-action" onClick={()=>setSelected(item.id)}>Evidence</button>{item.source_ip&&<AppLink href={`/sources/${encodeURIComponent(item.source_ip)}`} go={go}>Source →</AppLink>}</div></div>):<EmptyState title="No findings" body="Explainable rule matches will appear here while the complete evidence trail remains in Activity."/>}</section>}{selected&&<FindingEvidence id={selected} go={go}/>}<section className="surface"><SectionHeading title="Webhook deliveries" note="Durable at-least-once handoff"/><DataTable columns={['status','endpoint','attempts','last_error','updated_at']} rows={pageItems(deliveries)} keyField="id" actionLabel="Retry" onOpen={row=>row.status==='failed'&&retry(String(row.id))}/></section></div>;
 }
 
 function FindingEvidence({id,go}:{id:string;go:(href:string)=>void}){const{data,total,error,loading}=useCompletePage<EventItem>(`/api/v1/findings/${encodeURIComponent(id)}/events`);return <section className="surface"><SectionHeading title="Finding evidence" note={`${total} linked Events`}/>{error?<ErrorState message={error}/>:loading?<TableSkeleton/>:<EventList events={data} go={go} detailed/>}</section>}
 
 function SettingsPage(){
   const{data:retention,error}=useData<Row>('/api/v1/retention');const{data:storage}=useData<Row>('/api/v1/storage');const{data:audit}=useData<PageResponse<Row>>('/api/v1/audit?limit=25');const{data:alertData}=useData<AlertPreferences>('/api/v1/preferences/alerts');const[result,setResult]=useState('');const[running,setRunning]=useState(false);const[webhooks,setWebhooks]=useState('');const[spike,setSpike]=useState(60);const[secret,setSecret]=useState('');const[saveStatus,setSaveStatus]=useState('');const[rules,setRules]=useState<Record<string,RulePreference>>(defaultAlertRules);
-  useEffect(()=>{if(alertData){setWebhooks(alertData.webhooks.join('\n'));setSpike(alertData.source_spike_per_minute);setRules(current=>{const next={...current};for(const[name,value]of Object.entries(alertData.rules||{})){next[name]={enabled:value.enabled,severity:value.severity||current[name]?.severity||'medium',cooldown_minutes:value.cooldown_minutes??15}}return next})}},[alertData]);
+  useEffect(()=>{if(alertData){setWebhooks(joinLines(alertData.webhooks));setSpike(alertData.source_spike_per_minute);setRules(current=>{const next={...current};for(const[name,value]of Object.entries(alertData.rules||{})){next[name]={enabled:value.enabled,severity:value.severity||current[name]?.severity||'medium',cooldown_minutes:value.cooldown_minutes??15}}return next})}},[alertData]);
   async function run(){setRunning(true);try{const response=await fetch('/api/v1/retention/run',{method:'POST'});setResult(JSON.stringify(await response.json()))}finally{setRunning(false)}}
   async function saveAlerts(){setSaveStatus('Saving…');try{await requestJSON('/api/v1/preferences/alerts','PUT',{webhooks:webhooks.split(/\s+/).filter(Boolean),source_spike_per_minute:spike,rules,...(secret?{webhook_signing_secret:secret}:{})});setSecret('');setSaveStatus('Alert settings saved.')}catch(e){setSaveStatus(e instanceof Error?e.message:String(e))}}
   function updateRule(name:string,patch:Partial<RulePreference>){setRules(current=>({...current,[name]:{...current[name],...patch}}))}

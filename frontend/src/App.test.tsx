@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {App, buildEventQuery, deriveInsights, eventTitle, paginationWindow, parseRoute, type ActivityFilters, type EventItem} from './App';
+import {App, buildEventQuery, deriveInsights, eventTitle, joinLines, pageItems, paginationWindow, parseRoute, type ActivityFilters, type EventItem} from './App';
 
 describe('dashboard entry point', () => {
   it('exports the application component', () => {
@@ -46,6 +46,14 @@ describe('dashboard entry point', () => {
     expect(paginationWindow(1,12)).toEqual([1,2,3,4,5]);
     expect(paginationWindow(7,12)).toEqual([5,6,7,8,9]);
     expect(paginationWindow(12,12)).toEqual([8,9,10,11,12]);
+  });
+
+  it('treats an empty API page encoded as null as an empty collection', () => {
+    expect(pageItems<{id:string}>({items:null})).toEqual([]);
+  });
+
+  it('treats null webhook preferences as an empty editor value', () => {
+    expect(joinLines(null)).toBe('');
   });
 });
 

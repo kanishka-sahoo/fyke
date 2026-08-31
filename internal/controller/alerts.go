@@ -47,7 +47,7 @@ func NewAlertEngine(ctx context.Context, st *store.Store, b *Broker, c config.Al
 
 func cloneAlertConfig(c config.Alerts) config.Alerts {
 	out := c
-	out.Webhooks = append([]string(nil), c.Webhooks...)
+	out.Webhooks = append([]string{}, c.Webhooks...)
 	if c.Rules != nil {
 		out.Rules = make(map[string]config.AlertRule, len(c.Rules))
 		for name, rule := range c.Rules {

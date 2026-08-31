@@ -65,6 +65,16 @@ func TestAlertPreferencesApplyAndPersist(t *testing.T) {
 	}
 }
 
+func TestEmptyAlertPreferencesUseJSONArray(t *testing.T) {
+	encoded, e := json.Marshal(cloneAlertConfig(config.Alerts{}))
+	if e != nil {
+		t.Fatal(e)
+	}
+	if !strings.Contains(string(encoded), `"webhooks":[]`) {
+		t.Fatalf("preferences = %s, want empty webhook array", encoded)
+	}
+}
+
 func TestUnhealthySensorRaisesOneAlertPerTransition(t *testing.T) {
 	st := alertTestStore(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -126,6 +136,25 @@ func TestEventsReturnsFilteredPaginationTotal(t *testing.T) {
 	}
 	if len(body.Items) != 1 || body.Total != 2 || body.Limit != 1 || body.Offset != 1 {
 		t.Fatalf("pagination response = %#v", body)
+	}
+}
+
+func TestEventsEmptyCollectionUsesJSONArray(t *testing.T) {
+	api := NewAPI(alertTestStore(t), NewBroker(), nil, config.Config{})
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/events", nil)
+	response := httptest.NewRecorder()
+	api.events(response, req)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var body struct {
+		Items json.RawMessage `json:"items"`
+	}
+	if e := json.NewDecoder(response.Body).Decode(&body); e != nil {
+		t.Fatal(e)
+	}
+	if string(body.Items) != "[]" {
+		t.Fatalf("items = %s, want []", body.Items)
 	}
 }
 
