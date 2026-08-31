@@ -3,6 +3,7 @@ package controller
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -89,5 +90,45 @@ func TestUnhealthySensorRaisesOneAlertPerTransition(t *testing.T) {
 	}
 	if e := st.DB().QueryRowContext(ctx, `SELECT count(*) FROM events WHERE event_type='alert'`).Scan(&alerts); e != nil || alerts != 2 {
 		t.Fatalf("alerts after second transition = %d, %v", alerts, e)
+	}
+}
+
+func TestEventsReturnsFilteredPaginationTotal(t *testing.T) {
+	st := alertTestStore(t)
+	ctx := context.Background()
+	for sequence, eventType := range []string{"command", "session.start", "command"} {
+		event := model.Event{SensorID: "ssh", SessionID: "session", Sequence: uint64(sequence + 1), Source: model.Endpoint{IP: "192.0.2.8"}, Protocol: "ssh", Type: eventType, Outcome: "success"}
+		if e := st.Insert(ctx, event); e != nil {
+			t.Fatal(e)
+		}
+	}
+	api := NewAPI(st, NewBroker(), nil, config.Config{})
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/events?type=command&limit=1&offset=1", nil)
+	response := httptest.NewRecorder()
+	api.events(response, req)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var body struct {
+		Items  []model.Event `json:"items"`
+		Total  int64         `json:"total"`
+		Limit  int           `json:"limit"`
+		Offset int           `json:"offset"`
+	}
+	if e := json.NewDecoder(response.Body).Decode(&body); e != nil {
+		t.Fatal(e)
+	}
+	if len(body.Items) != 1 || body.Total != 2 || body.Limit != 1 || body.Offset != 1 {
+		t.Fatalf("pagination response = %#v", body)
+	}
+}
+
+func TestEventsRejectsInvalidTimeRange(t *testing.T) {
+	api := NewAPI(alertTestStore(t), NewBroker(), nil, config.Config{})
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/events?since=not-a-time", nil)
+	response := httptest.NewRecorder()
+	api.events(response, req)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
 }

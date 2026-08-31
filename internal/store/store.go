@@ -197,6 +197,43 @@ func (s *Store) List(ctx context.Context, q Query) ([]EventRecord, error) {
 	if q.Limit <= 0 || q.Limit > 1000 {
 		q.Limit = 100
 	}
+	where, args := eventWhere(q)
+	args = append(args, q.Limit, q.Offset)
+	rows, e := s.db.QueryContext(ctx, `SELECT id,timestamp,schema_version,sensor_id,session_id,sequence,source_ip,source_port,destination_ip,destination_port,protocol,event_type,outcome,persona,attributes_json,protocol_json FROM events WHERE `+where+` ORDER BY timestamp DESC LIMIT ? OFFSET ?`, args...)
+	if e != nil {
+		return nil, e
+	}
+	defer rows.Close()
+	var out []EventRecord
+	for rows.Next() {
+		var r EventRecord
+		var ts, a, p string
+		if e = rows.Scan(&r.ID, &ts, &r.Schema, &r.SensorID, &r.SessionID, &r.Sequence, &r.Source.IP, &r.Source.Port, &r.Destination.IP, &r.Destination.Port, &r.Protocol, &r.Type, &r.Outcome, &r.Persona, &a, &p); e != nil {
+			return nil, e
+		}
+		r.Timestamp, _ = time.Parse(time.RFC3339Nano, ts)
+		json.Unmarshal([]byte(a), &r.Attributes)
+		json.Unmarshal([]byte(p), &r.ProtocolData)
+		refs, er := s.evidenceRefs(ctx, r.ID)
+		if er != nil {
+			return nil, er
+		}
+		r.EvidenceRefs = refs
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// Count returns the number of events matching the same filters accepted by
+// List. Limit and offset intentionally do not affect the count.
+func (s *Store) Count(ctx context.Context, q Query) (int64, error) {
+	where, args := eventWhere(q)
+	var total int64
+	e := s.db.QueryRowContext(ctx, `SELECT count(*) FROM events WHERE `+where, args...).Scan(&total)
+	return total, e
+}
+
+func eventWhere(q Query) (string, []any) {
 	where := []string{"1=1"}
 	args := []any{}
 	add := func(clause string, v any) { where = append(where, clause); args = append(args, v) }
@@ -223,32 +260,9 @@ func (s *Store) List(ctx context.Context, q Query) ([]EventRecord, error) {
 	}
 	if q.Search != "" {
 		where = append(where, "id IN (SELECT id FROM event_search WHERE event_search MATCH ?)")
-		args = append(args, q.Search)
+		args = append(args, `"`+strings.ReplaceAll(q.Search, `"`, `""`)+`"`)
 	}
-	args = append(args, q.Limit, q.Offset)
-	rows, e := s.db.QueryContext(ctx, `SELECT id,timestamp,schema_version,sensor_id,session_id,sequence,source_ip,source_port,destination_ip,destination_port,protocol,event_type,outcome,persona,attributes_json,protocol_json FROM events WHERE `+strings.Join(where, " AND ")+` ORDER BY timestamp DESC LIMIT ? OFFSET ?`, args...)
-	if e != nil {
-		return nil, e
-	}
-	defer rows.Close()
-	var out []EventRecord
-	for rows.Next() {
-		var r EventRecord
-		var ts, a, p string
-		if e = rows.Scan(&r.ID, &ts, &r.Schema, &r.SensorID, &r.SessionID, &r.Sequence, &r.Source.IP, &r.Source.Port, &r.Destination.IP, &r.Destination.Port, &r.Protocol, &r.Type, &r.Outcome, &r.Persona, &a, &p); e != nil {
-			return nil, e
-		}
-		r.Timestamp, _ = time.Parse(time.RFC3339Nano, ts)
-		json.Unmarshal([]byte(a), &r.Attributes)
-		json.Unmarshal([]byte(p), &r.ProtocolData)
-		refs, er := s.evidenceRefs(ctx, r.ID)
-		if er != nil {
-			return nil, er
-		}
-		r.EvidenceRefs = refs
-		out = append(out, r)
-	}
-	return out, rows.Err()
+	return strings.Join(where, " AND "), args
 }
 
 // Event returns one normalized event and its encrypted evidence references.

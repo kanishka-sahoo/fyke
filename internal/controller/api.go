@@ -164,11 +164,37 @@ func (a *API) events(w http.ResponseWriter, r *http.Request) {
 	qv := r.URL.Query()
 	limit, _ := strconv.Atoi(qv.Get("limit"))
 	offset, _ := strconv.Atoi(qv.Get("offset"))
+	if limit < 1 || limit > 1000 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
 	q := store.Query{Limit: limit, Offset: offset, Protocol: qv.Get("protocol"), Type: qv.Get("type"), Outcome: qv.Get("outcome"), Source: qv.Get("source"), Session: qv.Get("session"), Search: qv.Get("q")}
-	q.Since, _ = time.Parse(time.RFC3339, qv.Get("since"))
-	q.Until, _ = time.Parse(time.RFC3339, qv.Get("until"))
+	var e error
+	if raw := qv.Get("since"); raw != "" {
+		if q.Since, e = time.Parse(time.RFC3339, raw); e != nil {
+			problem(w, http.StatusBadRequest, "since must be an RFC3339 timestamp")
+			return
+		}
+	}
+	if raw := qv.Get("until"); raw != "" {
+		if q.Until, e = time.Parse(time.RFC3339, raw); e != nil {
+			problem(w, http.StatusBadRequest, "until must be an RFC3339 timestamp")
+			return
+		}
+	}
+	if !q.Since.IsZero() && !q.Until.IsZero() && q.Until.Before(q.Since) {
+		problem(w, http.StatusBadRequest, "until must not be earlier than since")
+		return
+	}
 	v, e := a.store.List(r.Context(), q)
-	respond(w, map[string]any{"items": v, "limit": limit, "offset": offset}, e)
+	if e != nil {
+		respond(w, nil, e)
+		return
+	}
+	total, e := a.store.Count(r.Context(), q)
+	respond(w, map[string]any{"items": v, "limit": limit, "offset": offset, "total": total}, e)
 }
 func (a *API) event(w http.ResponseWriter, r *http.Request) {
 	v, e := a.store.Event(r.Context(), r.PathValue("id"))

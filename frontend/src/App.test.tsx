@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {App, deriveInsights, eventTitle, parseRoute, type EventItem} from './App';
+import {App, buildEventQuery, deriveInsights, eventTitle, paginationWindow, parseRoute, type ActivityFilters, type EventItem} from './App';
 
 describe('dashboard entry point', () => {
   it('exports the application component', () => {
@@ -28,6 +28,24 @@ describe('dashboard entry point', () => {
     expect(insights.map(item=>item.title)).toContain('Known web enumerator observed');
     expect(insights.map(item=>item.title)).toContain('Interactive access obtained');
     expect(insights.map(item=>item.title)).toContain('Post-login commands observed');
+  });
+
+  it('builds server-side pagination and time filters', () => {
+    const filters:ActivityFilters={search:'gobuster',protocol:'http',type:'http.request',outcome:'success',range:'1h',customSince:'',customUntil:''};
+    const query=new URL(buildEventQuery(filters,3,25,new Date('2026-08-31T12:00:00Z')),'http://fyke.local');
+    expect(query.searchParams.get('limit')).toBe('25');
+    expect(query.searchParams.get('offset')).toBe('50');
+    expect(query.searchParams.get('since')).toBe('2026-08-31T11:00:00.000Z');
+    expect(query.searchParams.get('protocol')).toBe('http');
+    expect(query.searchParams.get('type')).toBe('http.request');
+    expect(query.searchParams.get('outcome')).toBe('success');
+    expect(query.searchParams.get('q')).toBe('gobuster');
+  });
+
+  it('keeps pagination controls centered around the current page', () => {
+    expect(paginationWindow(1,12)).toEqual([1,2,3,4,5]);
+    expect(paginationWindow(7,12)).toEqual([5,6,7,8,9]);
+    expect(paginationWindow(12,12)).toEqual([8,9,10,11,12]);
   });
 });
 

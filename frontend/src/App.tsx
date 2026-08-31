@@ -1,4 +1,4 @@
-import {ReactNode, useEffect, useMemo, useState} from 'react';
+import {FormEvent, ReactNode, useEffect, useMemo, useState} from 'react';
 
 type Endpoint={ip:string;port:number};
 type EvidenceRef={ID?:string;Kind?:string;ContentType?:string;Filename?:string;SHA256?:string;Size?:number;id?:string;kind?:string;content_type?:string;filename?:string;sha256?:string;size?:number};
@@ -8,9 +8,14 @@ type Overview={events_24h:number;sessions_24h:number;sources_24h:number;artifact
 type Row=Record<string,unknown>;
 type Insight={id:string;severity:'high'|'medium'|'low';title:string;description:string;href:string;source?:string;count?:number};
 type Route={page:'overview'|'activity'|'sessions'|'session'|'sources'|'source'|'artifacts'|'alerts'|'settings'|'event'|'raw'|'not-found';id?:string;rawKind?:'events'|'sessions'|'sources'};
+type TimeRange='15m'|'1h'|'24h'|'7d'|'all'|'custom';
+export type ActivityFilters={search:string;protocol:string;type:string;outcome:string;range:TimeRange;customSince:string;customUntil:string};
+type EventPageResponse={items:EventItem[];limit:number;offset:number;total:number};
 
 const nav=[['Overview','/'],['Activity','/activity'],['Sessions','/sessions'],['Sources','/sources'],['Artifacts','/artifacts'],['Alerts','/alerts']] as const;
 const severityRank={high:3,medium:2,low:1};
+const eventTypes=['authentication.attempt','command','http.request','http.malformed','artifact.upload','ssh.scp','session.start','session.end','transcript.chunk','alert'];
+const timeRanges:[TimeRange,string][]=[['15m','15 min'],['1h','1 hour'],['24h','24 hours'],['7d','7 days'],['all','All time'],['custom','Custom']];
 
 export function parseRoute(pathname:string):Route {
   const parts=pathname.split('/').filter(Boolean).map(part=>{try{return decodeURIComponent(part)}catch{return part}});
@@ -111,16 +116,22 @@ function OverviewPage({overview,go}:{overview?:Overview;go:(href:string)=>void})
 }
 
 function ActivityPage({go}:{go:(href:string)=>void}){
-  const{items:events,error,loading}=useEventFeed('/api/v1/events?limit=1000');
-  const[search,setSearch]=useState('');const[protocol,setProtocol]=useState('all');const[type,setType]=useState('all');
-  const types=useMemo(()=>Array.from(new Set(events.map(e=>e.event_type))).sort(),[events]);
-  const filtered=useMemo(()=>events.filter(event=>{
-    const haystack=[eventTitle(event),eventDescription(event),event.source?.ip,event.session_id,event.protocol,event.event_type,JSON.stringify(event.attributes||{})].join(' ').toLowerCase();
-    return(protocol==='all'||event.protocol===protocol)&&(type==='all'||event.event_type===type)&&haystack.includes(search.toLowerCase());
-  }),[events,protocol,type,search]);
+  const[filters,setFilters]=useState<ActivityFilters>({search:'',protocol:'all',type:'all',outcome:'all',range:'24h',customSince:'',customUntil:''});
+  const[searchInput,setSearchInput]=useState('');const[pageSize,setPageSize]=useState(25);const[page,setPage]=useState(1);const[refresh,setRefresh]=useState(0);const[pending,setPending]=useState(0);
+  const query=useMemo(()=>`${buildEventQuery(filters,page,pageSize)}&refresh=${refresh}`,[filters,page,pageSize,refresh]);
+  const{data,error,loading}=useData<EventPageResponse>(query);const events=data?.items||[];const total=data?.total||0;const pageCount=Math.max(1,Math.ceil(total/pageSize));
+  useEffect(()=>{if(page>pageCount)setPage(pageCount)},[page,pageCount]);
+  useEffect(()=>{const stream=new EventSource('/api/v1/stream');const receive=()=>setPending(value=>value+1);stream.addEventListener('event',receive);return()=>stream.close()},[]);
+  function update<K extends keyof ActivityFilters>(key:K,value:ActivityFilters[K]){setFilters(current=>({...current,[key]:value}));setPage(1)}
+  function search(event:FormEvent){event.preventDefault();update('search',searchInput.trim())}
+  function clear(){setFilters({search:'',protocol:'all',type:'all',outcome:'all',range:'24h',customSince:'',customUntil:''});setSearchInput('');setPage(1)}
+  function reload(){setRefresh(value=>value+1);setPending(0);setPage(1)}
   return <div className="page-stack"><PageHeader eyebrow="Evidence explorer" title="Activity log" description="Scan normalized events in plain language, then open any record for structured detail." actions={<a className="text-action" href="/api/v1/exports?format=jsonl">Export JSONL ↗</a>}/>
-    <section className="surface filter-surface"><label className="search-field"><span>Search evidence</span><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="IP, command, path, event…"/></label><FilterSelect label="Protocol" value={protocol} onChange={setProtocol} options={['all','ssh','telnet','http','https','sensor']}/><FilterSelect label="Event" value={type} onChange={setType} options={['all',...types]}/><div className="result-count"><b>{filtered.length}</b><span>shown</span></div></section>
-    {error&&<ErrorState message={error}/>} {loading?<TableSkeleton/>:<section className="surface log-surface"><EventList events={filtered} go={go} detailed/><footer className="table-footer">Showing up to 1,000 newest records. Use export for offline analysis.</footer></section>}
+    <section className="surface filter-panel"><form className="filter-surface" onSubmit={search}><label className="search-field"><span>Search evidence</span><input value={searchInput} onChange={e=>setSearchInput(e.target.value)} placeholder="IP, command, path, event…"/></label><FilterSelect label="Protocol" value={filters.protocol} onChange={value=>update('protocol',value)} options={['all','ssh','telnet','http','https','sensor']}/><FilterSelect label="Event" value={filters.type} onChange={value=>update('type',value)} options={['all',...eventTypes]}/><FilterSelect label="Outcome" value={filters.outcome} onChange={value=>update('outcome',value)} options={['all','success','failure','triggered']}/><button className="filter-apply" type="submit">Apply</button></form>
+      <div className="time-filter"><span>Time window</span><div className="range-options">{timeRanges.map(([value,label])=><button key={value} className={filters.range===value?'active':''} onClick={()=>update('range',value)}>{label}</button>)}</div>{filters.range==='custom'&&<div className="custom-dates"><label><span>From</span><input type="datetime-local" value={filters.customSince} onChange={e=>update('customSince',e.target.value)}/></label><label><span>To</span><input type="datetime-local" value={filters.customUntil} onChange={e=>update('customUntil',e.target.value)}/></label></div>}<button className="clear-filters" onClick={clear}>Reset filters</button></div>
+    </section>
+    {pending>0&&<button className="new-evidence" onClick={reload}><span>{pending}</span> new event{pending===1?'':'s'} available · refresh results</button>}
+    {error&&<ErrorState message={error}/>} {loading?<TableSkeleton/>:<section className="surface log-surface"><EventList events={events} go={go} detailed/><Pagination page={page} pageSize={pageSize} total={total} onPage={setPage} onPageSize={value=>{setPageSize(value);setPage(1)}}/></section>}
   </div>;
 }
 
@@ -200,6 +211,10 @@ function SectionHeading({title,note,action,compact=false}:{title:string;note?:st
 function Metric({label,value,note}:{label:string;value?:number;note:string}){return <article className="metric"><span>{label}</span><strong>{value===undefined?'—':value.toLocaleString()}</strong><small>{note}</small></article>}
 function DetailStat({label,value}:{label:string;value:string}){return <div><span>{label}</span><b>{value}</b></div>}
 function FilterSelect({label,value,onChange,options}:{label:string;value:string;onChange:(value:string)=>void;options:string[]}){return <label className="select-field"><span>{label}</span><select value={value} onChange={e=>onChange(e.target.value)}>{options.map(option=><option key={option} value={option}>{option==='all'?'All':humanize(option)}</option>)}</select></label>}
+function Pagination({page,pageSize,total,onPage,onPageSize}:{page:number;pageSize:number;total:number;onPage:(page:number)=>void;onPageSize:(size:number)=>void}){
+  const pageCount=Math.max(1,Math.ceil(total/pageSize));const start=total?(page-1)*pageSize+1:0;const end=Math.min(page*pageSize,total);const pages=paginationWindow(page,pageCount);
+  return <footer className="pagination"><div className="page-size"><span>Rows per page</span><select value={pageSize} onChange={event=>onPageSize(Number(event.target.value))}>{[10,25,100].map(size=><option value={size} key={size}>{size}</option>)}</select></div><p><b>{start.toLocaleString()}–{end.toLocaleString()}</b> of {total.toLocaleString()} events</p><nav aria-label="Activity pages"><button onClick={()=>onPage(1)} disabled={page===1} aria-label="First page">«</button><button onClick={()=>onPage(page-1)} disabled={page===1} aria-label="Previous page">‹</button>{pages.map(value=><button key={value} className={value===page?'active':''} onClick={()=>onPage(value)} aria-current={value===page?'page':undefined}>{value}</button>)}<button onClick={()=>onPage(page+1)} disabled={page===pageCount} aria-label="Next page">›</button><button onClick={()=>onPage(pageCount)} disabled={page===pageCount} aria-label="Last page">»</button></nav></footer>
+}
 function ErrorState({message}:{message:string}){return <div role="alert" className="error-state"><b>Could not load this view</b><span>{message}</span></div>}
 function EmptyState({title,body}:{title:string;body:string}){return <div className="empty-state"><span>○</span><b>{title}</b><p>{body}</p></div>}
 function DashboardSkeleton(){return <div className="dashboard-skeleton"><i/><i/><i/><i/></div>}
@@ -225,6 +240,26 @@ function EvidencePreview({preview}:{preview:Row}){return <div className="evidenc
 function ProtocolMix({protocols}:{protocols:Record<string,number>}){const entries=Object.entries(protocols).sort((a,b)=>b[1]-a[1]);const total=entries.reduce((sum,[,value])=>sum+value,0);if(!total)return <EmptyState title="No protocol activity" body="The distribution will appear after the first sensor event."/>;return <div className="protocol-mix">{entries.map(([name,value])=><div key={name}><span><b>{name.toUpperCase()}</b><em>{Math.round(value/total*100)}%</em></span><i><u style={{width:`${value/total*100}%`}}/></i></div>)}</div>}
 function SensorList({sensors}:{sensors:Sensor[]}){if(!sensors.length)return <p className="muted-copy sensor-empty">No sensors have checked in.</p>;return <div className="sensor-list">{sensors.map(sensor=><div key={sensor.id}><span className={`sensor-dot ${sensor.status}`}/><b>{sensor.id}</b><small>{sensor.status} · {formatRelative(sensor.last_seen)}</small></div>)}</div>}
 function Breadcrumbs({items,go}:{items:[string,string][];go:(href:string)=>void}){return <nav className="breadcrumbs" aria-label="Breadcrumb">{items.map(([label,href],index)=><span key={`${label}-${index}`}>{index>0&&<i>/</i>}{href?<AppLink href={href} go={go}>{label}</AppLink>:<b>{label}</b>}</span>)}</nav>}
+
+export function buildEventQuery(filters:ActivityFilters,page:number,pageSize:number,now=new Date()):string{
+  const params=new URLSearchParams();const size=[10,25,100].includes(pageSize)?pageSize:25;const current=Math.max(1,page);
+  params.set('limit',String(size));params.set('offset',String((current-1)*size));
+  if(filters.search)params.set('q',filters.search);
+  if(filters.protocol!=='all')params.set('protocol',filters.protocol);
+  if(filters.type!=='all')params.set('type',filters.type);
+  if(filters.outcome!=='all')params.set('outcome',filters.outcome);
+  const durations:Partial<Record<TimeRange,number>>={"15m":15*60*1000,"1h":60*60*1000,"24h":24*60*60*1000,"7d":7*24*60*60*1000};const duration=durations[filters.range];
+  if(duration)params.set('since',new Date(now.getTime()-duration).toISOString());
+  if(filters.range==='custom'){
+    const since=parseLocalDate(filters.customSince);const until=parseLocalDate(filters.customUntil);
+    if(since)params.set('since',since.toISOString());if(until)params.set('until',until.toISOString());
+  }
+  return`/api/v1/events?${params.toString()}`;
+}
+
+export function paginationWindow(page:number,pageCount:number):number[]{
+  const count=Math.max(1,pageCount);const current=Math.min(Math.max(1,page),count);const start=Math.max(1,Math.min(current-2,count-4));const end=Math.min(count,start+4);return Array.from({length:end-start+1},(_,index)=>start+index);
+}
 
 export function deriveInsights(events:EventItem[]):Insight[]{
   const findings:Insight[]=[];const bySource=new Map<string,EventItem[]>();
@@ -280,4 +315,5 @@ function formatTime(value:string){const date=new Date(value);return Number.isNaN
 function formatDay(value:string){const date=new Date(value);return Number.isNaN(date.getTime())?'':date.toLocaleDateString([],{month:'short',day:'numeric'})}
 function formatRelative(value:string){const seconds=Math.round((new Date(value).getTime()-Date.now())/1000);const abs=Math.abs(seconds);if(abs<60)return'just now';if(abs<3600)return`${Math.round(abs/60)}m ago`;if(abs<86400)return`${Math.round(abs/3600)}h ago`;return`${Math.round(abs/86400)}d ago`}
 function formatBytes(value:number){if(!Number.isFinite(value)||value<=0)return'0 B';const units=['B','KB','MB','GB'];const i=Math.min(Math.floor(Math.log(value)/Math.log(1024)),units.length-1);return`${(value/1024**i).toFixed(i?1:0)} ${units[i]}`}
-async function get<T>(url:string):Promise<T>{const response=await fetch(url);if(!response.ok)throw Error(`${response.status} ${response.statusText}`);return response.json() as Promise<T>}
+function parseLocalDate(value:string){if(!value)return undefined;const date=new Date(value);return Number.isNaN(date.getTime())?undefined:date}
+async function get<T>(url:string):Promise<T>{const response=await fetch(url);if(!response.ok){const problem=await response.json().catch(()=>({})) as{title?:string};throw Error(problem.title?`${response.status} · ${problem.title}`:`${response.status} ${response.statusText}`)}return response.json() as Promise<T>}
